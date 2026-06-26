@@ -1,0 +1,16 @@
+# Large / derived data — distributed via GitHub Releases, not git
+*.pkl
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Build / packaging artifacts
+.build-venv/
+build/
+dist/
+*.spec
+
+# OS
+.DS_Store
