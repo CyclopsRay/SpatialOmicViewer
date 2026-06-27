@@ -85,6 +85,7 @@ and edit the header fields. The two CSVs can start as just their header row.
 
 Regions and variant groups are written back to the two CSVs immediately, so they
 reload next time you open the config.
+<img width="1503" height="929" alt="image" src="https://github.com/user-attachments/assets/52ea12ce-7124-4ebb-a525-519aa1ea0b61" />
 
 ## Defaults (config `variant_grouping:`)
 
