@@ -18,6 +18,10 @@ HILITE_PEN = pg.mkPen(150, 20, 20, 255)
 SELECT_BRUSH = pg.mkBrush(241, 196, 15, 230)    # yellow (active lasso selection)
 SELECT_PEN = pg.mkPen(120, 90, 0, 255)
 
+# Burden colour ramp: sky blue (low SNV count) -> purple (high).
+BURDEN_CMAP = pg.ColorMap([0.0, 0.5, 1.0],
+                          [(135, 206, 235), (120, 110, 200), (142, 68, 173)])
+
 
 class LassoViewBox(pg.ViewBox):
     """ViewBox that, in lasso mode, captures a freehand polygon on left-drag."""
@@ -69,6 +73,9 @@ class SpatialView(QtWidgets.QWidget):
         self._barcodes: List[str] = []
         self._xy = np.zeros((0, 2))
         self._img_item: Optional[pg.ImageItem] = None
+        self._burden: Optional[np.ndarray] = None   # per-plotted-spot SNV count
+        self._color_mode = False
+        self._legend: Optional[pg.GradientLegend] = None
 
         self.glw = pg.GraphicsLayoutWidget()
         self.vb = LassoViewBox(lockAspect=True, invertY=True, enableMenu=False)
@@ -79,8 +86,15 @@ class SpatialView(QtWidgets.QWidget):
         self._spots.setZValue(10)
         self._hilite = pg.ScatterPlotItem(pxMode=False, brush=HILITE_BRUSH, pen=HILITE_PEN)
         self._hilite.setZValue(20)
+        self._preview = pg.ScatterPlotItem(pxMode=False, pen=None)   # auto-region preview
+        self._preview.setZValue(18)
+        self._seeds = pg.ScatterPlotItem(pxMode=False, brush=pg.mkBrush(20, 20, 20, 0),
+                                         pen=pg.mkPen(0, 0, 0, 255, width=2))  # seed rings
+        self._seeds.setZValue(22)
         self.vb.addItem(self._spots)
+        self.vb.addItem(self._preview)
         self.vb.addItem(self._hilite)
+        self.vb.addItem(self._seeds)
 
         # tiny background toggle, top-right overlay
         self.bg_toggle = QtWidgets.QCheckBox("background", self)
@@ -89,6 +103,14 @@ class SpatialView(QtWidgets.QWidget):
             "QCheckBox{background:rgba(255,255,255,180);padding:2px 4px;"
             "border-radius:3px;font-size:10px;}")
         self.bg_toggle.toggled.connect(self._on_bg_toggle)
+
+        # toggle: colour spots by SNV count (top-right, under the bg toggle)
+        self.color_toggle = QtWidgets.QCheckBox("color by SNV count", self)
+        self.color_toggle.setChecked(False)
+        self.color_toggle.setStyleSheet(
+            "QCheckBox{background:rgba(255,255,255,180);padding:2px 4px;"
+            "border-radius:3px;font-size:10px;}")
+        self.color_toggle.toggled.connect(self.set_color_mode)
 
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -117,7 +139,62 @@ class SpatialView(QtWidgets.QWidget):
                   "data": self._barcodes[i]} for i in range(len(self._barcodes))]
         self._spots.setData(spots)
         self._hilite.setData([])
+        self._burden = None
+        self._apply_color_mode()
         self.vb.autoRange()
+
+    # ------------------------------------------------------- burden colouring
+    def set_burden(self, barcodes: List[str], counts) -> None:
+        """Provide the per-spot SNV count used by the 'color by SNV count' mode."""
+        lut = {b: float(c) for b, c in zip(barcodes, counts)}
+        self._burden = np.array([lut.get(b, 0.0) for b in self._barcodes], dtype=float)
+        if self._color_mode:
+            self._apply_color_mode()
+
+    def set_color_mode(self, on: bool) -> None:
+        self._color_mode = bool(on)
+        if self.color_toggle.isChecked() != self._color_mode:
+            self.color_toggle.setChecked(self._color_mode)
+        self._apply_color_mode()
+
+    def _apply_color_mode(self) -> None:
+        """Recolour base spots by SNV-count rank and show/hide the legend."""
+        self._remove_legend()
+        if (not self._color_mode or self._burden is None
+                or len(self._burden) != len(self._barcodes) or len(self._barcodes) == 0):
+            self._spots.setBrush(BASE_BRUSH)
+            return
+        b = self._burden
+        # quantile-rank in [0,1] so the ramp spreads across the (skewed) population
+        order = b.argsort()
+        rank = np.empty_like(b)
+        rank[order] = np.linspace(0.0, 1.0, len(b)) if len(b) > 1 else 0.0
+        colors = BURDEN_CMAP.map(rank, mode="qcolor")
+        self._spots.setBrush([pg.mkBrush(c) for c in colors])
+        self._add_legend(b)
+
+    def _add_legend(self, b: np.ndarray) -> None:
+        legend = pg.GradientLegend(size=(18, 150), offset=(12, 36))
+        grad = QtGui.QLinearGradient(0, 0, 0, 1)
+        for stop in np.linspace(0, 1, 11):
+            grad.setColorAt(float(stop), BURDEN_CMAP.map(float(stop), mode="qcolor"))
+        legend.setGradient(grad)
+        # label ticks with the actual SNV count at each quantile of the ramp
+        labels = {}
+        for f in (0.0, 0.25, 0.5, 0.75, 1.0):
+            labels[str(int(round(np.quantile(b, f))))] = f
+        legend.setLabels(labels)
+        legend.setParentItem(self.vb)
+        self._legend = legend
+
+    def _remove_legend(self) -> None:
+        if self._legend is not None:
+            try:
+                self._legend.setParentItem(None)
+                self.vb.scene().removeItem(self._legend)
+            except Exception:  # noqa: BLE001
+                pass
+            self._legend = None
 
     def _idx_size(self) -> float:
         if self._spots.data is None or len(self._spots.data) == 0:
@@ -138,6 +215,33 @@ class SpatialView(QtWidgets.QWidget):
 
     def clear_highlight(self) -> None:
         self._hilite.setData([])
+
+    # ------------------------------------------------ auto-region preview
+    PREVIEW_PALETTE = [(230, 126, 34), (41, 128, 185), (39, 174, 96),
+                       (142, 68, 173), (192, 57, 43), (22, 160, 133),
+                       (211, 84, 0), (52, 73, 94)]
+
+    def preview_regions(self, regions: List[List[str]],
+                        seeds: Optional[List[str]] = None) -> None:
+        """Show candidate auto-regions (one colour each) and seed rings."""
+        size = self._idx_size() * 1.05
+        pos = {bc: (self._xy[i, 0], self._xy[i, 1])
+               for i, bc in enumerate(self._barcodes)}
+        spots = []
+        for ri, region in enumerate(regions):
+            r, g, b = self.PREVIEW_PALETTE[ri % len(self.PREVIEW_PALETTE)]
+            brush = pg.mkBrush(r, g, b, 200)
+            for bc in region:
+                if bc in pos:
+                    spots.append({"pos": pos[bc], "size": size, "brush": brush})
+        self._preview.setData(spots)
+        seed_pts = [{"pos": pos[bc], "size": size * 0.6}
+                    for bc in (seeds or []) if bc in pos]
+        self._seeds.setData(seed_pts)
+
+    def clear_preview(self) -> None:
+        self._preview.setData([])
+        self._seeds.setData([])
 
     # ------------------------------------------------------------ selection
     def set_selection_mode(self, enabled: bool) -> None:
@@ -166,3 +270,7 @@ class SpatialView(QtWidgets.QWidget):
         self.bg_toggle.adjustSize()
         self.bg_toggle.move(self.width() - self.bg_toggle.width() - m, m)
         self.bg_toggle.raise_()
+        self.color_toggle.adjustSize()
+        self.color_toggle.move(self.width() - self.color_toggle.width() - m,
+                               m + self.bg_toggle.height() + 4)
+        self.color_toggle.raise_()

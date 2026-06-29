@@ -1,6 +1,9 @@
 # Large / derived data — distributed via GitHub Releases, not git
 *.pkl
 
+# App-generated SNV exports (Export ▸ defaults to <study>/outs/)
+outs/
+
 # Python
 __pycache__/
 *.pyc

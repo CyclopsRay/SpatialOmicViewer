@@ -53,6 +53,10 @@ class StudyData:
         self.spot_diameter: float = 0.0
         # cached per-SNV total presence count over all matrix spots
         self._total_counts: Optional[pd.Series] = None
+        # optional per-spot total UMI (barcode -> count); None if no coverage file
+        self.coverage: Optional[pd.Series] = None
+        # cached spot adjacency: (plot-order barcodes, list[np.ndarray] neighbor idx)
+        self._adj: Optional[tuple] = None
 
         # tumor regions: name -> ordered list of barcodes
         self.regions: Dict[str, List[str]] = {}
@@ -85,8 +89,27 @@ class StudyData:
         df["in_tissue"] = pos.get("in_tissue", 1)
         self.positions = df
 
+        self._load_coverage()
         self._load_regions()
         self._load_variant_groups()
+
+    def _load_coverage(self) -> None:
+        """Load optional per-spot coverage (barcode,total_umi). Falls back to a
+        `spot_coverage.csv` next to the config if the config doesn't name one."""
+        self.coverage = None
+        path = self.cfg.spot_coverage
+        if not path:
+            cand = os.path.join(self.cfg.root, "spot_coverage.csv")
+            path = cand if os.path.exists(cand) else ""
+        if not path or not os.path.exists(path):
+            return
+        df = pd.read_csv(path)
+        cols = {c.lower(): c for c in df.columns}
+        bc = cols.get("barcode", df.columns[0])
+        umi = cols.get("total_umi", df.columns[-1])
+        self.coverage = pd.Series(
+            df[umi].astype(float).values, index=df[bc].astype(str).values)
+        self.coverage = self.coverage[~self.coverage.index.duplicated(keep="first")]
 
     def _load_regions(self) -> None:
         self.regions = {}
@@ -139,6 +162,164 @@ class StudyData:
         sub = self.matrix[cols]
         mask = (sub.values > 0).any(axis=1)
         return list(self.matrix.index[mask])
+
+    # ----------------------------------------------------- per-spot burden
+    def per_spot_burden(self, snvs: Optional[List[str]] = None) -> pd.Series:
+        """Number of SNVs present per plotted spot (presence row-sum), in plot order.
+
+        If `snvs` is given the burden is restricted to those columns; otherwise it
+        is over the whole matrix."""
+        bcs = self.spot_barcodes
+        if not bcs:
+            return pd.Series(dtype=np.int64)
+        if snvs is not None:
+            cols = [s for s in snvs if s in self.matrix.columns]
+            sub = self.matrix.loc[bcs, cols] if cols else None
+            if sub is None:
+                return pd.Series(0, index=bcs, dtype=np.int64)
+            vals = (sub.values > 0).sum(axis=1)
+        else:
+            vals = (self.matrix.loc[bcs].values > 0).sum(axis=1)
+        return pd.Series(vals.astype(np.int64), index=bcs)
+
+    def per_spot_intensity(self, normalize: bool = True,
+                           snvs: Optional[List[str]] = None) -> pd.Series:
+        """Per-spot intensity used for tumor detection, in plot order.
+
+        With `normalize` and a coverage table available, returns the OLS residual of
+        burden ~ total_UMI (coverage-independent signal). Otherwise returns raw burden.
+        """
+        burden = self.per_spot_burden(snvs).astype(float)
+        if not normalize or self.coverage is None or burden.empty:
+            return burden
+        umi = self.coverage.reindex(burden.index).astype(float)
+        if umi.isna().all():
+            return burden
+        # fill missing coverage with the median so those spots aren't distorted
+        umi = umi.fillna(umi.median())
+        x = umi.values
+        y = burden.values
+        A = np.column_stack([np.ones_like(x), x])
+        coef, *_ = np.linalg.lstsq(A, y, rcond=None)
+        resid = y - A @ coef
+        return pd.Series(resid, index=burden.index)
+
+    # ----------------------------------------------------- spot adjacency
+    def spot_adjacency(self) -> tuple:
+        """Return (barcodes, neighbors) where neighbors[i] is an int array of the
+        indices adjacent to spot i on the Visium grid. Adjacency = up to 6 nearest
+        spots within 1.5x the median nearest-neighbour distance (so tissue gaps
+        break connectivity). Cached."""
+        bcs = self.spot_barcodes
+        if self._adj is not None and self._adj[0] == bcs:
+            return self._adj
+        xy = self.positions.loc[bcs, ["x", "y"]].to_numpy(dtype=float)
+        n = len(bcs)
+        neighbors: List[np.ndarray] = [np.empty(0, dtype=int) for _ in range(n)]
+        if n >= 2:
+            k = min(6, n - 1)
+            nn1 = np.empty(n)
+            knn = [None] * n
+            # chunked pairwise distances to keep memory bounded for big sections
+            chunk = 1024
+            for s in range(0, n, chunk):
+                e = min(s + chunk, n)
+                d = np.linalg.norm(xy[s:e, None, :] - xy[None, :, :], axis=2)
+                for r in range(e - s):
+                    i = s + r
+                    order = np.argpartition(d[r], k)[:k + 1]
+                    order = order[order != i][:k]
+                    knn[i] = order
+                    nn1[i] = d[r][order].min() if len(order) else np.inf
+            cutoff = 1.5 * np.median(nn1[np.isfinite(nn1)]) if n else 0.0
+            for i in range(n):
+                order = knn[i]
+                dist = np.linalg.norm(xy[order] - xy[i], axis=1)
+                neighbors[i] = order[dist <= cutoff]
+        self._adj = (bcs, neighbors)
+        return self._adj
+
+    def _smooth(self, values: np.ndarray, neighbors: List[np.ndarray]) -> np.ndarray:
+        """Mean of each spot with its neighbours (denoise salt-and-pepper)."""
+        out = np.empty_like(values, dtype=float)
+        for i, nb in enumerate(neighbors):
+            if len(nb):
+                out[i] = (values[i] + values[nb].sum()) / (len(nb) + 1)
+            else:
+                out[i] = values[i]
+        return out
+
+    # ----------------------------------------------------- auto tumor regions
+    def auto_tumor_regions(self, seed_pct: float = 90.0, grow_pct: float = 60.0,
+                           min_size: int = 5, normalize: bool = True,
+                           snvs: Optional[List[str]] = None,
+                           extra_seeds: Optional[List[str]] = None,
+                           excluded_seeds: Optional[List[str]] = None) -> dict:
+        """Hysteresis-thresholded seeded region growing on the spot grid.
+
+        Smooth the per-spot intensity, take spots above `seed_pct` percentile that are
+        local maxima as seeds (plus any `extra_seeds`, minus `excluded_seeds`), then
+        grow over adjacency through spots above `grow_pct` percentile. Connected
+        components containing a seed and with >= `min_size` spots become regions.
+
+        Returns {'regions': list[list[barcode]], 'seeds': list[barcode],
+                 'intensity': Series(barcode->smoothed intensity)}.
+        """
+        bcs, neighbors = self.spot_adjacency()
+        n = len(bcs)
+        if n == 0:
+            return {"regions": [], "seeds": [], "intensity": pd.Series(dtype=float)}
+        raw = self.per_spot_intensity(normalize=normalize, snvs=snvs).reindex(bcs).values
+        s = self._smooth(raw, neighbors)
+        idx = {b: i for i, b in enumerate(bcs)}
+
+        seed_thr = np.percentile(s, seed_pct)
+        grow_thr = np.percentile(s, grow_pct)
+        weak = s >= grow_thr
+
+        # auto seeds: above seed threshold AND a local maximum among neighbours
+        seed_mask = np.zeros(n, dtype=bool)
+        for i in range(n):
+            if s[i] >= seed_thr and (len(neighbors[i]) == 0 or s[i] >= s[neighbors[i]].max()):
+                seed_mask[i] = True
+        for b in (extra_seeds or []):
+            if b in idx:
+                seed_mask[idx[b]] = True
+                weak[idx[b]] = True       # honour a manual seed even if below grow_thr
+        for b in (excluded_seeds or []):
+            if b in idx:
+                seed_mask[idx[b]] = False
+
+        # connected components over the weak set, via BFS on adjacency
+        comp = -np.ones(n, dtype=int)
+        regions: List[List[int]] = []
+        for start in range(n):
+            if not weak[start] or comp[start] >= 0:
+                continue
+            cid = len(regions)
+            stack = [start]
+            comp[start] = cid
+            members = []
+            while stack:
+                u = stack.pop()
+                members.append(u)
+                for v in neighbors[u]:
+                    if weak[v] and comp[v] < 0:
+                        comp[v] = cid
+                        stack.append(v)
+            regions.append(members)
+
+        # keep components that contain a seed and are big enough
+        out: List[List[str]] = []
+        for members in regions:
+            if len(members) < min_size:
+                continue
+            if not any(seed_mask[m] for m in members):
+                continue
+            out.append([bcs[m] for m in members])
+        out.sort(key=len, reverse=True)
+        seeds = [bcs[i] for i in range(n) if seed_mask[i]]
+        return {"regions": out, "seeds": seeds, "intensity": pd.Series(s, index=bcs)}
 
     # ----------------------------------------------------- variant generation
     def _inside_counts(self, region: str) -> tuple:

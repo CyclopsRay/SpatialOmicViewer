@@ -63,11 +63,64 @@ def main():
     hits = sd.spots_with_snvs(gen[:5]) if gen else []
     print(f"spots carrying first 5 'general' SNVs: {len(hits)}")
 
-    # export
-    out = os.path.join(tmp, "snvs.txt")
-    sd.export_snvs(exc[:10], out)
-    assert sum(1 for _ in open(out)) == min(10, len(exc))
-    print("export OK")
+    # export / import round-trip (JSON with provenance)
+    out = os.path.join(tmp, "snvs.json")
+    src_meta = {"regions": [rname], "groups": ["exclusive"]}
+    sd.export_snvs(exc[:10], out, src_meta)
+    doc = StudyData.import_snvs(out)
+    assert doc["contents"] == "variants"
+    assert doc["variants"] == exc[:10]
+    assert doc["source"] == src_meta
+    print("export/import JSON OK")
+
+    # --- per-spot burden + coverage-normalized intensity --------------------
+    burden = sd.per_spot_burden()
+    assert list(burden.index) == sd.spot_barcodes
+    assert (burden.values >= 0).all() and burden.max() <= sd.matrix.shape[1]
+    print(f"burden: min={int(burden.min())} median={int(burden.median())} "
+          f"max={int(burden.max())}  coverage_loaded={sd.coverage is not None}")
+    inten = sd.per_spot_intensity(normalize=True)
+    assert len(inten) == len(burden)
+    # raw and normalized differ when coverage is available
+    if sd.coverage is not None:
+        assert not (inten.values == burden.values).all()
+
+    # --- spot adjacency -----------------------------------------------------
+    bcs, neighbors = sd.spot_adjacency()
+    deg = [len(n) for n in neighbors]
+    import numpy as np
+    print(f"adjacency: {len(bcs)} spots, mean degree {np.mean(deg):.2f}, "
+          f"max {max(deg)}")
+    assert max(deg) <= 6
+    # symmetry: build index, check a sample of edges are mutual-ish (kNN need not be)
+    assert np.mean(deg) > 2, "grid adjacency unexpectedly sparse"
+
+    # --- auto tumor regions -------------------------------------------------
+    res = sd.auto_tumor_regions(seed_pct=90, grow_pct=60, min_size=5)
+    regions = res["regions"]
+    print(f"auto regions @intensity90: {len(regions)} regions, "
+          f"sizes {[len(r) for r in regions][:8]}")
+    assert all(len(r) >= 5 for r in regions), "min_size not enforced"
+    # contiguity: each region is connected under the adjacency graph
+    idx = {b: i for i, b in enumerate(bcs)}
+    for region in regions:
+        members = set(idx[b] for b in region)
+        seen = {next(iter(members))}
+        stack = [next(iter(members))]
+        while stack:
+            u = stack.pop()
+            for v in neighbors[u]:
+                if v in members and v not in seen:
+                    seen.add(v)
+                    stack.append(v)
+        assert seen == members, "auto region is not contiguous!"
+    print("auto-region contiguity OK")
+    # higher intensity keeps fewer-or-equal spots
+    res_lo = sd.auto_tumor_regions(seed_pct=70, grow_pct=40, min_size=5)
+    hi_spots = sum(len(r) for r in regions)
+    lo_spots = sum(len(r) for r in res_lo["regions"])
+    print(f"spots kept: intensity70={lo_spots}  intensity90={hi_spots}")
+    assert lo_spots >= hi_spots, "lower intensity should keep >= spots"
 
     shutil.rmtree(tmp)
     print("\nALL CORE TESTS PASSED")

@@ -50,6 +50,11 @@ class StudyConfig:
     def variant_groups(self) -> str:
         return self.files["variant_groups"]
 
+    @property
+    def spot_coverage(self) -> str:
+        """Optional per-spot coverage CSV (barcode,total_umi). '' if not configured."""
+        return self.files.get("spot_coverage", "")
+
     def title(self) -> str:
         return f"{self.project} — {self.study}"
 

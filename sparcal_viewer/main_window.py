@@ -29,6 +29,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_selection: List[str] = []   # barcodes from last lasso
         self.current_snvs: List[str] = []         # SNVs shown in column 3
         self.current_snv_source: dict = {"regions": [], "groups": []}  # provenance
+        self._auto_dialog: Optional["AutoTumorDialog"] = None
 
         self._build_ui()
         self._show_placeholder()
@@ -91,11 +92,13 @@ class MainWindow(QtWidgets.QMainWindow):
         hb.setContentsMargins(0, 0, 0, 0)
         self.btn_add = QtWidgets.QPushButton("Add")
         self.btn_edit = QtWidgets.QPushButton("Edit")
+        self.btn_auto = QtWidgets.QPushButton("Auto")
         self.btn_generate = QtWidgets.QPushButton("Generate ▾")
         self.btn_add.clicked.connect(self._start_add_region)
         self.btn_edit.clicked.connect(self._start_edit_regions)
+        self.btn_auto.clicked.connect(self._open_auto_dialog)
         self.btn_generate.clicked.connect(self._show_generate_menu)
-        for b in (self.btn_add, self.btn_edit, self.btn_generate):
+        for b in (self.btn_add, self.btn_edit, self.btn_auto, self.btn_generate):
             hb.addWidget(b)
         hb.addStretch(1)
         v.addWidget(self.region_bar)
@@ -187,6 +190,8 @@ class MainWindow(QtWidgets.QMainWindow):
         bcs = data.spot_barcodes
         xy = data.positions.loc[bcs, ["x", "y"]].to_numpy()
         self.spatial.set_data(cfg.hires_image, bcs, xy, data.spot_diameter)
+        burden = data.per_spot_burden()
+        self.spatial.set_burden(list(burden.index), burden.values)
         self._refresh_region_tree()
         self._clear_snvs()
         self.statusBar().showMessage(
@@ -336,8 +341,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Added region '{rn}' ({len(self.current_selection)} spots)")
 
     def _on_spatial_selection(self, barcodes: List[str]) -> None:
+        if self._auto_dialog is not None and self._auto_dialog.seed_mode():
+            self._auto_dialog.on_seed_lasso(barcodes)
+            return
         self.current_selection = barcodes
         self.statusBar().showMessage(f"Selected {len(barcodes)} spots")
+
+    # ---- auto tumor regions --------------------------------------------
+    def _open_auto_dialog(self) -> None:
+        if not self.data:
+            return
+        if self._auto_dialog is not None:
+            self._auto_dialog.raise_()
+            self._auto_dialog.activateWindow()
+            return
+        self._auto_dialog = AutoTumorDialog(self)
+        self._auto_dialog.show()
 
     # ---- edit / merge / delete -----------------------------------------
     def _start_edit_regions(self) -> None:
@@ -621,3 +640,174 @@ class ThresholdDialog(QtWidgets.QDialog):
 
     def values(self):
         return float(self.sp_max.value()), float(self.sp_min.value())
+
+
+class AutoTumorDialog(QtWidgets.QDialog):
+    """Non-modal panel: auto-detect contiguous tumor regions by SNV-burden intensity.
+
+    Higher intensity keeps fewer/smaller regions. The user can lasso spots on the
+    tissue to force-add or exclude seeds, then create the regions."""
+
+    def __init__(self, main: "MainWindow"):
+        super().__init__(main)
+        self.main = main
+        self.data = main.data
+        self.spatial = main.spatial
+        self.setWindowTitle("Auto tumor regions")
+        self.setModal(False)
+        self._seed_mode = None              # None | "add" | "exclude"
+        self.extra_seeds: List[str] = []
+        self.excluded_seeds: List[str] = []
+        self._last = {"regions": [], "seeds": []}
+
+        form = QtWidgets.QFormLayout(self)
+
+        self.sl = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.sl.setRange(50, 99)
+        self.sl.setValue(90)
+        self.lbl_intensity = QtWidgets.QLabel("90")
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.sl, 1)
+        row.addWidget(self.lbl_intensity)
+        form.addRow("Intensity (higher = fewer spots)", self._wrap(row))
+
+        self.sp_margin = QtWidgets.QSpinBox()
+        self.sp_margin.setRange(0, 50)
+        self.sp_margin.setValue(30)
+        form.addRow("Grow margin (percentile below seed)", self.sp_margin)
+
+        self.sp_minsize = QtWidgets.QSpinBox()
+        self.sp_minsize.setRange(1, 200)
+        self.sp_minsize.setValue(5)
+        form.addRow("Min region size (spots)", self.sp_minsize)
+
+        self.cb_norm = QtWidgets.QCheckBox("Normalize by coverage (UMI)")
+        has_cov = self.data is not None and self.data.coverage is not None
+        self.cb_norm.setChecked(has_cov)
+        self.cb_norm.setEnabled(has_cov)
+        if not has_cov:
+            self.cb_norm.setToolTip("No spot_coverage.csv found for this study; "
+                                    "using raw SNV burden.")
+        form.addRow(self.cb_norm)
+
+        # manual seed override
+        self.btn_add_seed = QtWidgets.QPushButton("Add seeds (lasso)")
+        self.btn_excl_seed = QtWidgets.QPushButton("Exclude (lasso)")
+        self.btn_add_seed.setCheckable(True)
+        self.btn_excl_seed.setCheckable(True)
+        self.btn_clear_seed = QtWidgets.QPushButton("Clear manual")
+        self.btn_add_seed.clicked.connect(lambda: self._toggle_seed_mode("add"))
+        self.btn_excl_seed.clicked.connect(lambda: self._toggle_seed_mode("exclude"))
+        self.btn_clear_seed.clicked.connect(self._clear_manual)
+        srow = QtWidgets.QHBoxLayout()
+        for b in (self.btn_add_seed, self.btn_excl_seed, self.btn_clear_seed):
+            srow.addWidget(b)
+        form.addRow("Manual seeds", self._wrap(srow))
+        self.lbl_manual = QtWidgets.QLabel("manual: +0 / −0")
+        form.addRow("", self.lbl_manual)
+
+        self.lbl_preview = QtWidgets.QLabel("—")
+        self.lbl_preview.setStyleSheet("font-weight: bold;")
+        form.addRow("Preview", self.lbl_preview)
+
+        bb = QtWidgets.QDialogButtonBox()
+        self.btn_create = bb.addButton("Create regions",
+                                       QtWidgets.QDialogButtonBox.AcceptRole)
+        bb.addButton(QtWidgets.QDialogButtonBox.Close)
+        self.btn_create.clicked.connect(self._create)
+        bb.rejected.connect(self.close)
+        form.addRow(bb)
+
+        self.sl.valueChanged.connect(self._on_intensity)
+        self.sp_margin.valueChanged.connect(lambda _: self._recompute())
+        self.sp_minsize.valueChanged.connect(lambda _: self._recompute())
+        self.cb_norm.toggled.connect(lambda _: self._recompute())
+        self._recompute()
+
+    @staticmethod
+    def _wrap(layout) -> QtWidgets.QWidget:
+        w = QtWidgets.QWidget()
+        layout.setContentsMargins(0, 0, 0, 0)
+        w.setLayout(layout)
+        return w
+
+    # -- intensity / recompute -------------------------------------------
+    def _on_intensity(self, v: int) -> None:
+        self.lbl_intensity.setText(str(v))
+        self._recompute()
+
+    def _recompute(self) -> None:
+        if not self.data:
+            return
+        seed_pct = float(self.sl.value())
+        grow_pct = max(0.0, seed_pct - float(self.sp_margin.value()))
+        res = self.data.auto_tumor_regions(
+            seed_pct=seed_pct, grow_pct=grow_pct,
+            min_size=int(self.sp_minsize.value()),
+            normalize=self.cb_norm.isChecked(),
+            extra_seeds=self.extra_seeds, excluded_seeds=self.excluded_seeds)
+        self._last = res
+        n_spots = sum(len(r) for r in res["regions"])
+        self.lbl_preview.setText(f"{len(res['regions'])} regions · {n_spots} spots")
+        self.spatial.preview_regions(res["regions"], res["seeds"])
+
+    # -- manual seed editing ---------------------------------------------
+    def seed_mode(self) -> bool:
+        return self._seed_mode is not None
+
+    def _toggle_seed_mode(self, mode: str) -> None:
+        btn = self.btn_add_seed if mode == "add" else self.btn_excl_seed
+        other = self.btn_excl_seed if mode == "add" else self.btn_add_seed
+        if btn.isChecked():
+            other.setChecked(False)
+            self._seed_mode = mode
+            self.spatial.set_selection_mode(True)
+        else:
+            self._seed_mode = None
+            self.spatial.set_selection_mode(False)
+
+    def on_seed_lasso(self, barcodes: List[str]) -> None:
+        if self._seed_mode == "add":
+            for b in barcodes:
+                if b not in self.extra_seeds:
+                    self.extra_seeds.append(b)
+                if b in self.excluded_seeds:
+                    self.excluded_seeds.remove(b)
+        elif self._seed_mode == "exclude":
+            for b in barcodes:
+                if b not in self.excluded_seeds:
+                    self.excluded_seeds.append(b)
+                if b in self.extra_seeds:
+                    self.extra_seeds.remove(b)
+        self.lbl_manual.setText(
+            f"manual: +{len(self.extra_seeds)} / −{len(self.excluded_seeds)}")
+        self._recompute()
+
+    def _clear_manual(self) -> None:
+        self.extra_seeds = []
+        self.excluded_seeds = []
+        self.lbl_manual.setText("manual: +0 / −0")
+        self._recompute()
+
+    # -- create / teardown -----------------------------------------------
+    def _create(self) -> None:
+        regions = self._last.get("regions", [])
+        if not regions:
+            QtWidgets.QMessageBox.information(self, "Auto", "No regions to create.")
+            return
+        base, ok = QtWidgets.QInputDialog.getText(
+            self, "Name regions", "Name prefix:", text="auto")
+        if not ok:
+            return
+        created = [self.data.add_region(f"{base}_{i + 1}", r)
+                   for i, r in enumerate(regions)]
+        self.main._refresh_region_tree()
+        self.main.statusBar().showMessage(
+            f"Created {len(created)} auto region(s): {', '.join(created)}")
+        self.close()
+
+    def closeEvent(self, ev) -> None:
+        self.spatial.set_selection_mode(False)
+        self.spatial.clear_preview()
+        self.main._auto_dialog = None
+        super().closeEvent(ev)
