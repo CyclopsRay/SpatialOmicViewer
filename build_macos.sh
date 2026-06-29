@@ -16,6 +16,7 @@ PYTHON="${PYTHON:-python3}"
 VENV=".build-venv"
 
 echo ">> creating build venv"
+rm -rf "$VENV"
 "$PYTHON" -m venv "$VENV"
 # shellcheck disable=SC1091
 source "$VENV/bin/activate"
@@ -24,6 +25,10 @@ pip install -r requirements.txt pyinstaller >/dev/null
 
 echo ">> running PyInstaller"
 rm -rf build dist
+# Anaconda Python may leak Qt plugin paths into the isolated child processes
+# that PyInstaller spawns for submodule collection, causing "Could not find
+# the Qt platform plugin 'cocoa'" errors.  Offscreen prevents that.
+export QT_QPA_PLATFORM=offscreen
 pyinstaller \
   --name "SPARCAL-SNV-Viewer" \
   --windowed \

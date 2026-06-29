@@ -269,7 +269,34 @@ class StudyData:
         df.to_csv(self.cfg.variant_groups, index=False)
 
     @staticmethod
-    def export_snvs(snvs: List[str], path: str) -> None:
+    def export_snvs(snvs: List[str], path: str,
+                    source: Optional[Dict] = None) -> None:
+        """Export SNVs as JSON with provenance metadata."""
+        doc = {
+            "contents": "variants",
+            "source": source or {"regions": [], "groups": []},
+            "variants": snvs,
+        }
         with open(path, "w") as fh:
-            for s in snvs:
-                fh.write(f"{s}\n")
+            json.dump(doc, fh, indent=2)
+
+    @staticmethod
+    def import_snvs(path: str) -> dict:
+        """Read an exported SNV JSON file.  Returns the parsed dict on success;
+        raises ValueError for unknown contents types."""
+        with open(path) as fh:
+            doc = json.load(fh)
+        if doc.get("contents") != "variants":
+            raise ValueError(
+                f"Unsupported contents type: {doc.get('contents')}")
+        required = {"variants", "source"}
+        missing = required - set(doc.keys())
+        if missing:
+            raise ValueError(f"Missing required fields: {', '.join(sorted(missing))}")
+        return doc
+
+    def delete_variant_groups(self, groups: List[tuple]) -> None:
+        """Delete multiple variant groups at once.  Each item is (region, name)."""
+        for key in groups:
+            self.variant_groups.pop(key, None)
+        self.save_variant_groups()

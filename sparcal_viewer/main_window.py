@@ -1,8 +1,9 @@
 """Main window: 3 columns — spatial view | tumor regions | SNV list."""
 from __future__ import annotations
 
+import json
 import os
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -27,6 +28,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.data: Optional[StudyData] = None
         self.current_selection: List[str] = []   # barcodes from last lasso
         self.current_snvs: List[str] = []         # SNVs shown in column 3
+        self.current_snv_source: dict = {"regions": [], "groups": []}  # provenance
 
         self._build_ui()
         self._show_placeholder()
@@ -58,7 +60,23 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_spatial_pane(self) -> QtWidgets.QWidget:
         self.spatial = SpatialView()
         self.spatial.selectionChanged.connect(self._on_spatial_selection)
-        return self.spatial
+
+        # Placeholder shown before any study is loaded.
+        placeholder = QtWidgets.QWidget()
+        pv = QtWidgets.QVBoxLayout(placeholder)
+        pv.setAlignment(QtCore.Qt.AlignCenter)
+        lbl = QtWidgets.QLabel("Click to open a config file")
+        lbl.setStyleSheet("color: #888; font-size: 18px;")
+        lbl.setAlignment(QtCore.Qt.AlignCenter)
+        lbl.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+        lbl.mousePressEvent = lambda ev: self._open_dialog()
+        pv.addWidget(lbl)
+
+        self.spatial_stack = QtWidgets.QStackedWidget()
+        self.spatial_stack.addWidget(placeholder)   # index 0 — empty
+        self.spatial_stack.addWidget(self.spatial)  # index 1 — study loaded
+        self.spatial_stack.setCurrentIndex(0)
+        return self.spatial_stack
 
     # ---- column 2 -------------------------------------------------------
     def _build_region_pane(self) -> QtWidgets.QWidget:
@@ -119,10 +137,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         hb = QtWidgets.QHBoxLayout()
         self.btn_export = QtWidgets.QPushButton("Export")
-        self.btn_select = QtWidgets.QPushButton("Select")
+        self.btn_import = QtWidgets.QPushButton("Import")
+        self.btn_select = QtWidgets.QPushButton("Select all")
         self.btn_export.clicked.connect(self._export_snvs)
-        self.btn_select.clicked.connect(self._toggle_select_mode)
+        self.btn_import.clicked.connect(self._import_snvs)
+        self.btn_select.clicked.connect(self._select_all_snvs)
         hb.addWidget(self.btn_export)
+        hb.addWidget(self.btn_import)
         hb.addWidget(self.btn_select)
         hb.addStretch(1)
         v.addLayout(hb)
@@ -137,14 +158,12 @@ class MainWindow(QtWidgets.QMainWindow):
         ab.setContentsMargins(0, 0, 0, 0)
         self.btn_show = QtWidgets.QPushButton("Show on tissue")
         self.btn_add_spots = QtWidgets.QPushButton("Add spots → region")
-        self.btn_select_done = QtWidgets.QPushButton("Done")
         self.btn_show.clicked.connect(self._show_snv_spots)
         self.btn_add_spots.clicked.connect(self._add_spots_from_snvs)
-        self.btn_select_done.clicked.connect(lambda: self._set_snv_select_mode(False))
-        for b in (self.btn_show, self.btn_add_spots, self.btn_select_done):
+        for b in (self.btn_show, self.btn_add_spots):
             ab.addWidget(b)
+        ab.addStretch(1)
         v.addWidget(self.snv_action_bar)
-        self.snv_action_bar.setVisible(False)
         return w
 
     # ============================================================ open study
@@ -163,6 +182,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.cfg, self.data = cfg, data
         self.setWindowTitle(f"SPARCAL Spatial-SNV Viewer — {cfg.title()}")
+        self.spatial_stack.setCurrentIndex(1)  # show spatial view
 
         bcs = data.spot_barcodes
         xy = data.positions.loc[bcs, ["x", "y"]].to_numpy()
@@ -216,7 +236,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if group_key:
             g = self.data.variant_groups.get(group_key)
             if g:
-                self._show_snvs(g.snvs, f"{g.region} ▸ {g.name}")
+                self._show_snvs(g.snvs, f"{g.region} ▸ {g.name}",
+                                {"regions": [g.region], "groups": [g.name]})
                 self.spatial.highlight(self.data.spots_with_snvs(g.snvs), g.color())
             return
         region = item.data(0, ROLE_REGION)
@@ -277,7 +298,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         g = self.data.add_variant_group(region, name, gtype, snvs)
         self._refresh_region_tree()
-        self._show_snvs(g.snvs, f"{g.region} ▸ {g.name}")
+        self._show_snvs(g.snvs, f"{g.region} ▸ {g.name}",
+                        {"regions": [g.region], "groups": [g.name]})
         self.spatial.highlight(self.data.spots_with_snvs(g.snvs), g.color())
         self.statusBar().showMessage(f"Generated '{g.name}': {len(g.snvs)} SNVs")
 
@@ -323,22 +345,32 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._edit_mode = True
         self.region_tree.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
-        self.lbl_mode.setText("Pick regions, then Merge/Delete")
+        self.lbl_mode.setText("Pick regions or groups, then Merge/Delete")
         self.btn_finish.setVisible(False)
         self.btn_merge.setVisible(True)
         self.btn_delete.setVisible(True)
         self._set_region_buttons(False)
 
-    def _selected_region_names(self) -> List[str]:
-        names = []
+    def _selected_region_and_group_names(self):
+        """Return (regions, groups) from the current tree selection.
+        Groups whose parent region is *also* selected are filtered out to
+        avoid double‑counting — deleting the region already deletes its groups."""
+        regions: List[str] = []
+        groups: List[tuple] = []        # (region_name, group_name)
+        selected_regions: set = set()
         for it in self.region_tree.selectedItems():
             r = it.data(0, ROLE_REGION)
-            if r and r not in names:
-                names.append(r)
-        return names
+            g = it.data(0, ROLE_GROUP)
+            if r and r not in regions:
+                regions.append(r)
+                selected_regions.add(r)
+            elif g:
+                if g[0] not in selected_regions and g not in groups:
+                    groups.append(g)
+        return regions, groups
 
     def _merge_regions(self) -> None:
-        names = self._selected_region_names()
+        names, _ = self._selected_region_and_group_names()
         if len(names) < 2:
             QtWidgets.QMessageBox.information(self, "Merge", "Select at least two regions.")
             return
@@ -352,14 +384,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Merged {len(names)} regions into '{rn}'")
 
     def _delete_regions(self) -> None:
-        names = self._selected_region_names()
-        if not names:
+        regions, groups = self._selected_region_and_group_names()
+        if not regions and not groups:
+            QtWidgets.QMessageBox.information(
+                self, "Delete", "No regions or groups selected.")
             return
+
+        # Build a human-readable list of everything that will be deleted.
+        affected: List[str] = []
+        for r in regions:
+            children = self.data.groups_for_region(r)
+            if children:
+                child_names = ", ".join(c.name for c in children)
+                affected.append(f"Region '{r}' and its {len(children)} group(s): {child_names}")
+            else:
+                affected.append(f"Region '{r}' (no groups)")
+        for rn, gn in groups:
+            affected.append(f"Group '{gn}' from region '{rn}'")
+
+        msg = "Delete the following?\n\n" + "\n".join(f"  • {a}" for a in affected)
         if QtWidgets.QMessageBox.question(
-                self, "Delete", f"Delete {len(names)} region(s) and their variant groups?"
-        ) != QtWidgets.QMessageBox.Yes:
+                self, "Delete", msg) != QtWidgets.QMessageBox.Yes:
             return
-        self.data.delete_regions(names)
+
+        if regions:
+            self.data.delete_regions(regions)
+        if groups:
+            self.data.delete_variant_groups(groups)
+
         self._cancel_region_mode()
         self._refresh_region_tree()
 
@@ -372,17 +424,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_region_buttons(True)
 
     # ============================================================ SNV column
-    def _show_snvs(self, snvs: List[str], title: str) -> None:
+    def _show_snvs(self, snvs: List[str], title: str,
+                    source: Optional[dict] = None) -> None:
         self.current_snvs = list(snvs)
+        self.current_snv_source = source or {"regions": [], "groups": []}
         self.snv_title.setText(f"<b>SNVs</b> — {title} ({len(snvs)})")
         self.snv_list.clear()
         self.snv_list.addItems(snvs)
 
     def _clear_snvs(self) -> None:
         self.current_snvs = []
+        self.current_snv_source = {"regions": [], "groups": []}
         self.snv_list.clear()
         self.snv_title.setText("<b>SNVs</b>")
-        self._set_snv_select_mode(False)
 
     def _selected_or_all_snvs(self) -> List[str]:
         items = self.snv_list.selectedItems()
@@ -390,26 +444,138 @@ class MainWindow(QtWidgets.QMainWindow):
             return [it.text() for it in items]
         return list(self.current_snvs)
 
+    def _select_all_snvs(self) -> None:
+        """Select every SNV in the list."""
+        self.snv_list.selectAll()
+        self.statusBar().showMessage(f"Selected {self.snv_list.count()} SNVs")
+
     def _export_snvs(self) -> None:
         snvs = self._selected_or_all_snvs()
         if not snvs:
             QtWidgets.QMessageBox.information(self, "Export", "No SNVs to export.")
             return
+        # Default to <config_root>/outs/snvs.json
+        default_dir = os.path.join(self.cfg.root, "outs") if self.cfg else ""
+        default_path = os.path.join(default_dir, "snvs.json") if default_dir else "snvs.json"
+        os.makedirs(default_dir, exist_ok=True) if default_dir else None
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Export SNVs", "snvs.txt", "Text (*.txt)")
+            self, "Export SNVs", default_path, "JSON (*.json)")
         if not path:
             return
-        StudyData.export_snvs(snvs, path)
+        StudyData.export_snvs(snvs, path, self.current_snv_source)
         self.statusBar().showMessage(f"Exported {len(snvs)} SNVs → {path}")
 
-    def _toggle_select_mode(self) -> None:
-        self._set_snv_select_mode(not self.snv_action_bar.isVisible())
+    def _import_snvs(self) -> None:
+        """Read an exported SNV JSON file and navigate to its source group.
+        If the region or group no longer exists they are re-created from the
+        variant list."""
+        if not self.data:
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Import SNVs", "", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            doc = StudyData.import_snvs(path)
+        except (ValueError, json.JSONDecodeError, OSError) as exc:
+            QtWidgets.QMessageBox.critical(
+                self, "Import failed", f"Could not read file:\n{exc}")
+            return
 
-    def _set_snv_select_mode(self, on: bool) -> None:
-        self.snv_action_bar.setVisible(on)
-        if on:
+        source = doc.get("source", {})
+        src_regions = source.get("regions", [])
+        src_groups = source.get("groups", [])
+        variants = doc.get("variants", [])
+
+        if not variants:
+            QtWidgets.QMessageBox.information(
+                self, "Import", "The file contains no variants.")
+            return
+
+        # Try to find a matching (region, group) pair that still exists.
+        matched_region: Optional[str] = None
+        matched_group: Optional[str] = None
+        for rn in src_regions:
+            for gn in src_groups:
+                if (rn, gn) in self.data.variant_groups:
+                    matched_region, matched_group = rn, gn
+                    break
+            if matched_region:
+                break
+
+        if matched_region and matched_group:
+            # Navigate to the existing group.
+            g = self.data.variant_groups[(matched_region, matched_group)]
+            self._show_snvs(g.snvs, f"{g.region} ▸ {g.name}",
+                            {"regions": [g.region], "groups": [g.name]})
+            self.spatial.highlight(self.data.spots_with_snvs(g.snvs), g.color())
+            self._select_tree_group(matched_region, matched_group)
             self.statusBar().showMessage(
-                "Select SNVs in the list (none = all), then Show / Add spots.")
+                f"Imported '{matched_group}' from region '{matched_region}' "
+                f"({len(variants)} variants)")
+            return
+
+        # -- Region / group does not exist → re-create from variants ---------
+        spots = self.data.spots_with_snvs(variants)
+        if not spots:
+            QtWidgets.QMessageBox.information(
+                self, "Import",
+                "None of the variants in this file are present in the current matrix.")
+            return
+
+        created_regions = 0
+        created_groups = 0
+        target_region: Optional[str] = None
+        target_group: Optional[str] = None
+
+        for rn in src_regions:
+            if rn not in self.data.regions:
+                self.data.add_region(rn, spots)
+                created_regions += 1
+            else:
+                # Existing region — merge the imported spots into it.
+                existing = set(self.data.region_in_matrix(rn))
+                merged = list(dict.fromkeys(self.data.regions[rn] + spots))
+                self.data.regions[rn] = merged
+                self.data.save_regions()
+            target_region = rn
+
+            for gn in src_groups:
+                if (rn, gn) not in self.data.variant_groups:
+                    self.data.add_variant_group(rn, gn, GROUP_SELECTION, variants)
+                    created_groups += 1
+                target_group = gn
+
+        self._refresh_region_tree()
+
+        if target_region and target_group:
+            g = self.data.variant_groups.get((target_region, target_group))
+            if g:
+                self._show_snvs(g.snvs, f"{g.region} ▸ {g.name}",
+                                {"regions": [g.region], "groups": [g.name]})
+                self.spatial.highlight(self.data.spots_with_snvs(g.snvs), g.color())
+                self._select_tree_group(target_region, target_group)
+
+        parts = []
+        if created_regions:
+            parts.append(f"{created_regions} region(s)")
+        if created_groups:
+            parts.append(f"{created_groups} group(s)")
+        self.statusBar().showMessage(
+            f"Imported: created {', '.join(parts)} from {len(variants)} variants")
+
+    def _select_tree_group(self, region: str, group_name: str) -> None:
+        """Expand the given region and select its group child item in the tree."""
+        for i in range(self.region_tree.topLevelItemCount()):
+            top = self.region_tree.topLevelItem(i)
+            if top.data(0, ROLE_REGION) == region:
+                top.setExpanded(True)
+                for j in range(top.childCount()):
+                    child = top.child(j)
+                    gk = child.data(0, ROLE_GROUP)
+                    if gk and gk == (region, group_name):
+                        self.region_tree.setCurrentItem(child)
+                        return
 
     def _show_snv_spots(self) -> None:
         snvs = self._selected_or_all_snvs()
