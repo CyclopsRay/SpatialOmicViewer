@@ -23,6 +23,36 @@ BURDEN_CMAP = pg.ColorMap([0.0, 0.5, 1.0],
                           [(135, 206, 235), (120, 110, 200), (142, 68, 173)])
 
 
+class TitledGradientLegend(pg.GradientLegend):
+    """A GradientLegend that also draws a one-line title above the colour bar."""
+
+    def __init__(self, size, offset, title: str = ""):
+        super().__init__(size, offset)
+        self._title = title
+
+    def setTitle(self, title: str) -> None:
+        self._title = title
+        self.update()
+
+    def paint(self, p, opt, widget):
+        super().paint(p, opt, widget)
+        if not self._title or not hasattr(self, "b"):
+            return
+        view = self.getViewBox()
+        if view is None:
+            return
+        p.save()
+        p.setTransform(view.sceneTransform())
+        p.setPen(self.textPen)
+        x1, x2, x3, y1, y2, _ = self.b
+        f = p.font()
+        f.setBold(True)
+        p.setFont(f)
+        p.drawText(QtCore.QRectF(x1 - 2, y1 - 20, max(x3 - x1 + 120, 140), 16),
+                   QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, self._title)
+        p.restore()
+
+
 class LassoViewBox(pg.ViewBox):
     """ViewBox that, in lasso mode, captures a freehand polygon on left-drag."""
 
@@ -76,6 +106,7 @@ class SpatialView(QtWidgets.QWidget):
         self._burden: Optional[np.ndarray] = None   # per-plotted-spot SNV count
         self._color_mode = False
         self._legend: Optional[pg.GradientLegend] = None
+        self._sel_legend: Optional[TitledGradientLegend] = None  # per-selection legend
 
         self.glw = pg.GraphicsLayoutWidget()
         self.vb = LassoViewBox(lockAspect=True, invertY=True, enableMenu=False)
@@ -91,10 +122,16 @@ class SpatialView(QtWidgets.QWidget):
         self._seeds = pg.ScatterPlotItem(pxMode=False, brush=pg.mkBrush(20, 20, 20, 0),
                                          pen=pg.mkPen(0, 0, 0, 255, width=2))  # seed rings
         self._seeds.setZValue(22)
+        # saved region centers: a star marker drawn when a region with a center is picked
+        self._centers = pg.ScatterPlotItem(pxMode=False, symbol="star",
+                                           brush=pg.mkBrush(255, 255, 0, 255),
+                                           pen=pg.mkPen(0, 0, 0, 255, width=1.5))
+        self._centers.setZValue(30)
         self.vb.addItem(self._spots)
         self.vb.addItem(self._preview)
         self.vb.addItem(self._hilite)
         self.vb.addItem(self._seeds)
+        self.vb.addItem(self._centers)
 
         # tiny background toggle, top-right overlay
         self.bg_toggle = QtWidgets.QCheckBox("background", self)
@@ -139,6 +176,8 @@ class SpatialView(QtWidgets.QWidget):
                   "data": self._barcodes[i]} for i in range(len(self._barcodes))]
         self._spots.setData(spots)
         self._hilite.setData([])
+        self.clear_centers()
+        self._remove_sel_legend()
         self._burden = None
         self._apply_color_mode()
         self.vb.autoRange()
@@ -203,6 +242,7 @@ class SpatialView(QtWidgets.QWidget):
 
     # ------------------------------------------------------------ highlight
     def highlight(self, barcodes: List[str], color: str = None) -> None:
+        self._remove_sel_legend()
         bset = set(barcodes)
         size = self._idx_size() * 1.05
         pts = [{"pos": (self._xy[i, 0], self._xy[i, 1]), "size": size}
@@ -215,6 +255,74 @@ class SpatialView(QtWidgets.QWidget):
 
     def clear_highlight(self) -> None:
         self._hilite.setData([])
+
+    # ----------------------------------------- selection-burden colouring
+    def highlight_by_burden(self, barcodes: List[str], counts, title: str = "") -> None:
+        """Highlight `barcodes`, colouring each spot by `counts` (e.g. the number of
+        currently-selected SNVs it carries) along the burden ramp, and show a legend
+        (top-left) keyed to *this* selection's count range.
+
+        Only spots with count > 0 are drawn."""
+        lut = {b: float(c) for b, c in zip(barcodes, counts)}
+        size = self._idx_size() * 1.05
+        idxs, vals = [], []
+        for i, bc in enumerate(self._barcodes):
+            c = lut.get(bc, 0.0)
+            if c > 0:
+                idxs.append(i)
+                vals.append(c)
+        if not idxs:
+            self._hilite.setData([])
+            self._remove_sel_legend()
+            return
+        v = np.asarray(vals, dtype=float)
+        vmax = v.max()
+        norm = (v - 1.0) / (vmax - 1.0) if vmax > 1 else np.zeros_like(v)
+        colors = BURDEN_CMAP.map(norm, mode="qcolor")
+        spots = [{"pos": (self._xy[i, 0], self._xy[i, 1]), "size": size,
+                  "brush": pg.mkBrush(colors[k])} for k, i in enumerate(idxs)]
+        self._hilite.setPen(HILITE_PEN)
+        self._hilite.setData(spots)
+        self._add_sel_legend(v, title)
+
+    def _add_sel_legend(self, v: np.ndarray, title: str) -> None:
+        self._remove_sel_legend()
+        legend = TitledGradientLegend(size=(18, 150), offset=(12, 60), title=title)
+        grad = QtGui.QLinearGradient(0, 0, 0, 1)
+        for stop in np.linspace(0, 1, 11):
+            grad.setColorAt(float(stop), BURDEN_CMAP.map(float(stop), mode="qcolor"))
+        legend.setGradient(grad)
+        vmax = float(v.max())
+        vmin = 1.0
+        labels = {}
+        for f in (0.0, 0.25, 0.5, 0.75, 1.0):
+            labels[str(int(round(vmin + f * (vmax - vmin))))] = f
+        legend.setLabels(labels)
+        legend.setParentItem(self.vb)
+        self._sel_legend = legend
+
+    def _remove_sel_legend(self) -> None:
+        if self._sel_legend is not None:
+            try:
+                self._sel_legend.setParentItem(None)
+                self.vb.scene().removeItem(self._sel_legend)
+            except Exception:  # noqa: BLE001
+                pass
+            self._sel_legend = None
+
+    def clear_selection_legend(self) -> None:
+        self._remove_sel_legend()
+
+    # ------------------------------------------------ saved region centers
+    def mark_centers(self, barcodes: List[str]) -> None:
+        bset = set(barcodes)
+        size = self._idx_size() * 1.4
+        pts = [{"pos": (self._xy[i, 0], self._xy[i, 1]), "size": size}
+               for i, bc in enumerate(self._barcodes) if bc in bset]
+        self._centers.setData(pts)
+
+    def clear_centers(self) -> None:
+        self._centers.setData([])
 
     # ------------------------------------------------ auto-region preview
     PREVIEW_PALETTE = [(230, 126, 34), (41, 128, 185), (39, 174, 96),

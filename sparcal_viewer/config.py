@@ -51,6 +51,12 @@ class StudyConfig:
         return self.files["variant_groups"]
 
     @property
+    def tumor_centers(self) -> str:
+        """Per-region center barcodes for auto-generated regions. Long format:
+        region_name,barcode. Written by the app; defaults next to the config."""
+        return self.files["tumor_centers"]
+
+    @property
     def spot_coverage(self) -> str:
         """Optional per-spot coverage CSV (barcode,total_umi). '' if not configured."""
         return self.files.get("spot_coverage", "")
@@ -92,6 +98,7 @@ def load_config(config_path: str) -> StudyConfig:
     # tumor_groups / variant_groups default to canonical names if omitted.
     files_in.setdefault("tumor_groups", "tumor_groups.csv")
     files_in.setdefault("variant_groups", "variant_groups.csv")
+    files_in.setdefault("tumor_centers", "tumor_centers.csv")
 
     files: Dict[str, str] = {}
     for name, rel in files_in.items():

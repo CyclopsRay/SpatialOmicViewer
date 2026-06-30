@@ -243,12 +243,24 @@ class MainWindow(QtWidgets.QMainWindow):
             if g:
                 self._show_snvs(g.snvs, f"{g.region} ▸ {g.name}",
                                 {"regions": [g.region], "groups": [g.name]})
-                self.spatial.highlight(self.data.spots_with_snvs(g.snvs), g.color())
+                self.spatial.clear_centers()
+                self._color_spots_by_snvs(g.snvs, f"{g.region} ▸ {g.name}")
             return
         region = item.data(0, ROLE_REGION)
         if region:
             self.spatial.clear_highlight()
             self.spatial.highlight(self.data.region_in_matrix(region), "#f1c40f")
+            # show the saved center(s) for auto-generated regions
+            rows = set(self.data.matrix.index)
+            centers = [c for c in self.data.region_centers.get(region, []) if c in rows]
+            self.spatial.mark_centers(centers)
+
+    def _color_spots_by_snvs(self, snvs: List[str], title: str) -> None:
+        """Highlight the spots carrying `snvs`, coloured by how many of those SNVs each
+        spot covers, with a selection-specific legend (top-left)."""
+        burden = self.data.per_spot_burden(snvs)
+        self.spatial.highlight_by_burden(
+            list(burden.index), burden.values, f"{title} — SNVs/spot")
 
     def _selected_region(self) -> Optional[str]:
         it = self.region_tree.currentItem()
@@ -305,7 +317,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_region_tree()
         self._show_snvs(g.snvs, f"{g.region} ▸ {g.name}",
                         {"regions": [g.region], "groups": [g.name]})
-        self.spatial.highlight(self.data.spots_with_snvs(g.snvs), g.color())
+        self.spatial.clear_centers()
+        self._color_spots_by_snvs(g.snvs, f"{g.region} ▸ {g.name}")
         self.statusBar().showMessage(f"Generated '{g.name}': {len(g.snvs)} SNVs")
 
     # ---- add region -----------------------------------------------------
@@ -527,7 +540,8 @@ class MainWindow(QtWidgets.QMainWindow):
             g = self.data.variant_groups[(matched_region, matched_group)]
             self._show_snvs(g.snvs, f"{g.region} ▸ {g.name}",
                             {"regions": [g.region], "groups": [g.name]})
-            self.spatial.highlight(self.data.spots_with_snvs(g.snvs), g.color())
+            self.spatial.clear_centers()
+            self._color_spots_by_snvs(g.snvs, f"{g.region} ▸ {g.name}")
             self._select_tree_group(matched_region, matched_group)
             self.statusBar().showMessage(
                 f"Imported '{matched_group}' from region '{matched_region}' "
@@ -572,7 +586,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if g:
                 self._show_snvs(g.snvs, f"{g.region} ▸ {g.name}",
                                 {"regions": [g.region], "groups": [g.name]})
-                self.spatial.highlight(self.data.spots_with_snvs(g.snvs), g.color())
+                self.spatial.clear_centers()
+                self._color_spots_by_snvs(g.snvs, f"{g.region} ▸ {g.name}")
                 self._select_tree_group(target_region, target_group)
 
         parts = []
@@ -599,7 +614,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _show_snv_spots(self) -> None:
         snvs = self._selected_or_all_snvs()
         spots = self.data.spots_with_snvs(snvs)
-        self.spatial.highlight(spots, "#2980b9")
+        self.spatial.clear_centers()
+        n_sel = len(self.snv_list.selectedItems())
+        title = (f"{n_sel} selected SNVs" if n_sel
+                 else f"{len(snvs)} SNVs")
+        self._color_spots_by_snvs(snvs, title)
         self.current_selection = spots
         self.statusBar().showMessage(f"{len(spots)} spots carry the {len(snvs)} selected SNV(s)")
 
@@ -681,6 +700,17 @@ class AutoTumorDialog(QtWidgets.QDialog):
         self.sp_minsize.setValue(5)
         form.addRow("Min region size (spots)", self.sp_minsize)
 
+        # how deep the valley between two centers must be before they stay separate
+        self.sp_split = QtWidgets.QSpinBox()
+        self.sp_split.setRange(0, 100)
+        self.sp_split.setValue(30)
+        self.sp_split.setSuffix(" %")
+        self.sp_split.setToolTip(
+            "When growing from two centers meets, keep them as SEPARATE regions only "
+            "if the valley between them drops by at least this % of the peak height.\n"
+            "Lower = split more eagerly; 100% = always merge touching regions.")
+        form.addRow("Split valley depth", self.sp_split)
+
         self.cb_norm = QtWidgets.QCheckBox("Normalize by coverage (UMI)")
         has_cov = self.data is not None and self.data.coverage is not None
         self.cb_norm.setChecked(has_cov)
@@ -721,6 +751,7 @@ class AutoTumorDialog(QtWidgets.QDialog):
         self.sl.valueChanged.connect(self._on_intensity)
         self.sp_margin.valueChanged.connect(lambda _: self._recompute())
         self.sp_minsize.valueChanged.connect(lambda _: self._recompute())
+        self.sp_split.valueChanged.connect(lambda _: self._recompute())
         self.cb_norm.toggled.connect(lambda _: self._recompute())
         self._recompute()
 
@@ -745,6 +776,7 @@ class AutoTumorDialog(QtWidgets.QDialog):
             seed_pct=seed_pct, grow_pct=grow_pct,
             min_size=int(self.sp_minsize.value()),
             normalize=self.cb_norm.isChecked(),
+            split_depth=float(self.sp_split.value()) / 100.0,
             extra_seeds=self.extra_seeds, excluded_seeds=self.excluded_seeds)
         self._last = res
         n_spots = sum(len(r) for r in res["regions"])
@@ -799,8 +831,12 @@ class AutoTumorDialog(QtWidgets.QDialog):
             self, "Name regions", "Name prefix:", text="auto")
         if not ok:
             return
-        created = [self.data.add_region(f"{base}_{i + 1}", r)
-                   for i, r in enumerate(regions)]
+        centers = self._last.get("centers", [])
+        created = [
+            self.data.add_region(
+                f"{base}_{i + 1}", r,
+                center=[centers[i]] if i < len(centers) and centers[i] else None)
+            for i, r in enumerate(regions)]
         self.main._refresh_region_tree()
         self.main.statusBar().showMessage(
             f"Created {len(created)} auto region(s): {', '.join(created)}")

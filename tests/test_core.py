@@ -122,6 +122,30 @@ def main():
     print(f"spots kept: intensity70={lo_spots}  intensity90={hi_spots}")
     assert lo_spots >= hi_spots, "lower intensity should keep >= spots"
 
+    # --- watershed split criterion -----------------------------------------
+    # one center per region, and every center lives inside its own region
+    assert len(res["centers"]) == len(regions)
+    for region, ctr in zip(regions, res["centers"]):
+        assert ctr in set(region), "region center is not inside its region!"
+    # split_depth=1.0 merges everything that touches -> fewer-or-equal regions
+    res_merge = sd.auto_tumor_regions(seed_pct=90, grow_pct=60, min_size=5,
+                                      split_depth=1.0)
+    res_split = sd.auto_tumor_regions(seed_pct=90, grow_pct=60, min_size=5,
+                                      split_depth=0.0)
+    print(f"regions: split_depth=1.0 -> {len(res_merge['regions'])}  "
+          f"split_depth=0.0 -> {len(res_split['regions'])}")
+    assert len(res_split["regions"]) >= len(res_merge["regions"]), \
+        "splitting should produce >= regions than full merge"
+
+    # --- region-center persistence -----------------------------------------
+    cregion = sd.add_region("ctr_region", sd.spot_barcodes[:30],
+                            center=[sd.spot_barcodes[0]])
+    assert sd.region_centers[cregion] == [sd.spot_barcodes[0]]
+    sd3 = StudyData(cfg)
+    assert sd3.region_centers.get(cregion) == [sd.spot_barcodes[0]], \
+        "region center did not round-trip through CSV"
+    print("region-center persistence OK")
+
     shutil.rmtree(tmp)
     print("\nALL CORE TESTS PASSED")
 

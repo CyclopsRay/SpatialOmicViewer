@@ -60,6 +60,8 @@ class StudyData:
 
         # tumor regions: name -> ordered list of barcodes
         self.regions: Dict[str, List[str]] = {}
+        # auto-detected region centers: name -> list of center barcodes (seed spots)
+        self.region_centers: Dict[str, List[str]] = {}
         # variant groups keyed by (region, group_name)
         self.variant_groups: Dict[tuple, VariantGroup] = {}
 
@@ -91,6 +93,7 @@ class StudyData:
 
         self._load_coverage()
         self._load_regions()
+        self._load_centers()
         self._load_variant_groups()
 
     def _load_coverage(self) -> None:
@@ -119,6 +122,17 @@ class StudyData:
             if {"region_name", "barcode"}.issubset(df.columns):
                 for name, sub in df.groupby("region_name", sort=False):
                     self.regions[str(name)] = list(dict.fromkeys(sub["barcode"].tolist()))
+
+    def _load_centers(self) -> None:
+        """Load per-region center barcodes (auto-region seeds) if present."""
+        self.region_centers = {}
+        path = self.cfg.tumor_centers
+        if path and os.path.exists(path) and os.path.getsize(path) > 0:
+            df = pd.read_csv(path, dtype=str)
+            if {"region_name", "barcode"}.issubset(df.columns):
+                for name, sub in df.groupby("region_name", sort=False):
+                    self.region_centers[str(name)] = list(
+                        dict.fromkeys(sub["barcode"].tolist()))
 
     def _load_variant_groups(self) -> None:
         self.variant_groups = {}
@@ -254,21 +268,30 @@ class StudyData:
                            min_size: int = 5, normalize: bool = True,
                            snvs: Optional[List[str]] = None,
                            extra_seeds: Optional[List[str]] = None,
-                           excluded_seeds: Optional[List[str]] = None) -> dict:
-        """Hysteresis-thresholded seeded region growing on the spot grid.
+                           excluded_seeds: Optional[List[str]] = None,
+                           split_depth: float = 0.30) -> dict:
+        """Seeded watershed region growing on the spot grid.
 
         Smooth the per-spot intensity, take spots above `seed_pct` percentile that are
         local maxima as seeds (plus any `extra_seeds`, minus `excluded_seeds`), then
-        grow over adjacency through spots above `grow_pct` percentile. Connected
-        components containing a seed and with >= `min_size` spots become regions.
+        flood the `grow_pct`-percentile "weak" set from those seeds in descending
+        intensity order so every weak spot is claimed by its nearest peak (a watershed).
 
-        Returns {'regions': list[list[barcode]], 'seeds': list[barcode],
+        Two adjacent basins that collide are *not* blindly merged: they fuse only when
+        the saddle (the highest point of contact between them) is shallow — i.e. the
+        valley separating the two centers reclaims less than `split_depth` of the
+        smaller peak's height above the grow floor. A deep valley keeps them as
+        distinct regions. Basins with a seed and >= `min_size` spots become regions.
+
+        Returns {'regions': list[list[barcode]], 'seeds'/'centers': list[barcode]
+                 (one representative center per region, aligned with 'regions'),
                  'intensity': Series(barcode->smoothed intensity)}.
         """
         bcs, neighbors = self.spot_adjacency()
         n = len(bcs)
         if n == 0:
-            return {"regions": [], "seeds": [], "intensity": pd.Series(dtype=float)}
+            return {"regions": [], "seeds": [], "centers": [],
+                    "intensity": pd.Series(dtype=float)}
         raw = self.per_spot_intensity(normalize=normalize, snvs=snvs).reindex(bcs).values
         s = self._smooth(raw, neighbors)
         idx = {b: i for i, b in enumerate(bcs)}
@@ -290,36 +313,89 @@ class StudyData:
             if b in idx:
                 seed_mask[idx[b]] = False
 
-        # connected components over the weak set, via BFS on adjacency
-        comp = -np.ones(n, dtype=int)
-        regions: List[List[int]] = []
-        for start in range(n):
-            if not weak[start] or comp[start] >= 0:
-                continue
-            cid = len(regions)
-            stack = [start]
-            comp[start] = cid
-            members = []
-            while stack:
-                u = stack.pop()
-                members.append(u)
-                for v in neighbors[u]:
-                    if weak[v] and comp[v] < 0:
-                        comp[v] = cid
-                        stack.append(v)
-            regions.append(members)
+        basins = self._watershed_basins(s, weak, neighbors, seed_mask,
+                                        grow_thr, split_depth)
 
-        # keep components that contain a seed and are big enough
+        # build output regions; keep basins big enough (every basin has >= 1 seed)
         out: List[List[str]] = []
-        for members in regions:
+        centers: List[str] = []
+        for members in basins:
             if len(members) < min_size:
                 continue
-            if not any(seed_mask[m] for m in members):
-                continue
             out.append([bcs[m] for m in members])
-        out.sort(key=len, reverse=True)
-        seeds = [bcs[i] for i in range(n) if seed_mask[i]]
-        return {"regions": out, "seeds": seeds, "intensity": pd.Series(s, index=bcs)}
+            seed_members = [m for m in members if seed_mask[m]]
+            pool = seed_members or members
+            center = max(pool, key=lambda m: s[m])   # highest-intensity seed = center
+            centers.append(bcs[center])
+        order = sorted(range(len(out)), key=lambda i: len(out[i]), reverse=True)
+        out = [out[i] for i in order]
+        centers = [centers[i] for i in order]
+        return {"regions": out, "seeds": centers, "centers": centers,
+                "intensity": pd.Series(s, index=bcs)}
+
+    @staticmethod
+    def _watershed_basins(s: np.ndarray, weak: np.ndarray,
+                          neighbors: List[np.ndarray], seed_mask: np.ndarray,
+                          grow_thr: float, split_depth: float) -> List[List[int]]:
+        """Priority-flood watershed from seeds, then merge basins whose dividing
+        saddle is shallow. Returns a list of basins (each a list of spot indices).
+
+        `split_depth` in [0,1]: two basins stay separate when the valley between their
+        peaks drops by at least this fraction of the shorter peak's height above
+        `grow_thr`. 0 -> always split touching peaks; 1 -> always merge (old behaviour).
+        """
+        import heapq
+
+        n = len(s)
+        seeds = [i for i in range(n) if seed_mask[i] and weak[i]]
+        label = -np.ones(n, dtype=int)
+        peak: List[float] = []
+        for k, sd in enumerate(seeds):
+            label[sd] = k
+            peak.append(float(s[sd]))
+
+        heap = [(-float(s[sd]), sd) for sd in seeds]
+        heapq.heapify(heap)
+        saddle: Dict[tuple, float] = {}    # (label_a, label_b) -> highest contact level
+        while heap:
+            _, u = heapq.heappop(heap)
+            lu = label[u]
+            for v in neighbors[u]:
+                if not weak[v]:
+                    continue
+                lv = label[v]
+                if lv < 0:
+                    label[v] = lu
+                    heapq.heappush(heap, (-float(s[v]), v))
+                elif lv != lu:
+                    a, b = (lu, lv) if lu < lv else (lv, lu)
+                    h = min(float(s[u]), float(s[v]))
+                    if h > saddle.get((a, b), -np.inf):
+                        saddle[(a, b)] = h
+
+        # union-find merge of basins separated only by a shallow saddle
+        parent = list(range(len(seeds)))
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for (a, b), h in saddle.items():
+            lower = min(peak[a], peak[b])
+            scale = lower - grow_thr
+            depth = 1.0 if scale <= 0 else (lower - h) / scale
+            if depth < split_depth:            # shallow valley -> same region
+                ra, rb = find(a), find(b)
+                if ra != rb:
+                    parent[rb] = ra
+
+        grouped: Dict[int, List[int]] = {}
+        for i in range(n):
+            if label[i] >= 0:
+                grouped.setdefault(find(label[i]), []).append(i)
+        return list(grouped.values())
 
     # ----------------------------------------------------- variant generation
     def _inside_counts(self, region: str) -> tuple:
@@ -368,38 +444,50 @@ class StudyData:
         return list(self.matrix.columns[mask])
 
     # ------------------------------------------------------------- mutation
-    def add_region(self, name: str, barcodes: List[str]) -> str:
+    def add_region(self, name: str, barcodes: List[str],
+                   center: Optional[List[str]] = None) -> str:
         name = self._unique_region_name(name)
         self.regions[name] = list(dict.fromkeys(barcodes))
+        if center:
+            centers = center if isinstance(center, (list, tuple)) else [center]
+            self.region_centers[name] = list(dict.fromkeys(c for c in centers if c))
         self.save_regions()
+        self.save_centers()
         return name
 
     def delete_regions(self, names: List[str]) -> None:
         for n in names:
             self.regions.pop(n, None)
+            self.region_centers.pop(n, None)
             for key in [k for k in self.variant_groups if k[0] == n]:
                 self.variant_groups.pop(key, None)
         self.save_regions()
+        self.save_centers()
         self.save_variant_groups()
 
     def merge_regions(self, names: List[str], new_name: str) -> str:
         merged: List[str] = []
+        centers: List[str] = []
         for n in names:
             merged.extend(self.regions.get(n, []))
+            centers.extend(self.region_centers.get(n, []))
         merged = list(dict.fromkeys(merged))
         self.delete_regions(names)
-        return self.add_region(new_name, merged)
+        return self.add_region(new_name, merged, center=centers or None)
 
     def rename_region(self, old: str, new: str) -> str:
         if old not in self.regions:
             return old
         new = self._unique_region_name(new, ignore=old)
         self.regions = {(new if k == old else k): v for k, v in self.regions.items()}
+        if old in self.region_centers:
+            self.region_centers[new] = self.region_centers.pop(old)
         for key in [k for k in self.variant_groups if k[0] == old]:
             g = self.variant_groups.pop(key)
             g.region = new
             self.variant_groups[(new, g.name)] = g
         self.save_regions()
+        self.save_centers()
         self.save_variant_groups()
         return new
 
@@ -440,6 +528,11 @@ class StudyData:
         rows = [(name, bc) for name, bcs in self.regions.items() for bc in bcs]
         df = pd.DataFrame(rows, columns=["region_name", "barcode"])
         df.to_csv(self.cfg.tumor_groups, index=False)
+
+    def save_centers(self) -> None:
+        rows = [(name, bc) for name, bcs in self.region_centers.items() for bc in bcs]
+        df = pd.DataFrame(rows, columns=["region_name", "barcode"])
+        df.to_csv(self.cfg.tumor_centers, index=False)
 
     def save_variant_groups(self) -> None:
         rows = []

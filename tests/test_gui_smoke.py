@@ -61,11 +61,15 @@ def main():
     print("snv list count:", win.snv_list.count())
     assert win.snv_list.count() == len(win.current_snvs)
 
-    # SNV 'show on tissue' path
+    # SNV 'show on tissue' path -> selection-specific burden legend appears
     if win.current_snvs:
         win.snv_list.item(0).setSelected(True)
         win._show_snv_spots()
         print("highlighted spots for 1 snv:", len(win.current_selection))
+        assert win.spatial._sel_legend is not None, "selection legend not shown"
+        # a plain region highlight should drop the selection legend
+        win.spatial.highlight(win.current_selection, "#f1c40f")
+        assert win.spatial._sel_legend is None, "selection legend not cleared"
 
     # export
     out = os.path.join(tmp, "out.txt")
@@ -100,6 +104,15 @@ def main():
             _Q.QInputDialog.getText = orig
         assert len(win.data.region_names()) == n_before + n_regions
         print("auto-created regions:", len(win.data.region_names()) - n_before)
+        # auto regions saved a center; clicking one marks it on the tissue
+        auto_names = [n for n in win.data.region_names()
+                      if win.data.region_centers.get(n)]
+        assert auto_names, "auto regions did not persist a center"
+        win._refresh_region_tree()
+        top = _find_top(auto_names[0])
+        win._on_tree_clicked(top, 0)
+        assert len(win.spatial._centers.data) >= 1, "center marker not drawn"
+        print("center marker drawn for", auto_names[0])
     assert win._auto_dialog is None, "dialog should clear itself on close"
 
     win.close()
