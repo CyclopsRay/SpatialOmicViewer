@@ -4,6 +4,21 @@ Version history for the SPARCAL Spatial-SNV Viewer. The running version is
 `sparcal_viewer.__version__`; the About dialog (click the app name on the top
 bar) shows it alongside the build time.
 
+## 1.0.0
+- **Hover hit-radius fix:** the region label now appears even when the cursor is
+  in the gap *between* spots — the snap radius is derived from the spot pitch
+  instead of a fraction of the spot size.
+- **Multiple centers per Auto region:** an Auto region keeps *all* its seed
+  centers (not just the strongest), so a basin fused from several peaks shows
+  several stars — exposing how many potential sub-regions a collection contains.
+- **Export profile map:** File ▸ Export ▸ "Profile map (with/without background)"
+  renders every region of the current profile in its own colour to **PDF** (vector)
+  or **PNG** (by file extension).
+- **Compare profiles:** on the profile page, Edit → select two profiles →
+  Function ▸ "Compare profiles" shows a region×region Jaccard overlap table plus
+  cluster-agreement scores (ARI, NMI, homogeneity, completeness, V-measure), all
+  computed pure-numpy. Item set = all in-tissue spots, unassigned → background.
+
 ## 0.5.0
 - **Tumor profiles:** Regions are now organized into named *profiles* (separate
   separations of the tissue — e.g. "Ground Truth", "Test", auto-detected). Column 2

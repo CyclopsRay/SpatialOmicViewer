@@ -292,6 +292,86 @@ class StudyData:
         self._barcode_region[prof] = out
         return out
 
+    # ------------------------------------------------- profile comparison
+    def compare_profiles(self, prof_a: str, prof_b: str,
+                         min_overlap: float = 0.05) -> dict:
+        """Compare two profiles as clusterings of the in-tissue spots.
+
+        Returns {'profiles', 'n_items', 'scores': {ari, nmi, homogeneity,
+        completeness, v_measure}, 'overlap': per-A-region best-matching B region by
+        Jaccard (+ other B regions above `min_overlap`)}. Item set = all matrix spots;
+        spots in no region get a shared 'background' label (overlap -> smallest region
+        wins, via barcode_region_map). All scores are pure-numpy."""
+        rows = list(self.matrix.index)
+        map_a, map_b = self.barcode_region_map(prof_a), self.barcode_region_map(prof_b)
+        labels_a = [map_a.get(b, "background") for b in rows]
+        labels_b = [map_b.get(b, "background") for b in rows]
+        scores = self._partition_scores(labels_a, labels_b)
+        overlap = self._region_overlap(prof_a, prof_b, min_overlap)
+        return {"profiles": (prof_a, prof_b), "n_items": len(rows),
+                "scores": scores, "overlap": overlap}
+
+    def _region_overlap(self, prof_a: str, prof_b: str,
+                        min_overlap: float) -> List[dict]:
+        rowset = set(self.matrix.index)
+        A = {r: set(bcs) & rowset
+             for r, bcs in self.profiles.get(prof_a, {}).get("regions", {}).items()}
+        B = {r: set(bcs) & rowset
+             for r, bcs in self.profiles.get(prof_b, {}).get("regions", {}).items()}
+        out: List[dict] = []
+        for ra, sa in A.items():
+            matches = []
+            for rb, sb in B.items():
+                inter = len(sa & sb)
+                if inter:
+                    matches.append((rb, inter / len(sa | sb)))
+            matches.sort(key=lambda t: t[1], reverse=True)
+            best, best_j = (matches[0] if matches else (None, 0.0))
+            also = [(rb, j) for rb, j in matches[1:] if j >= min_overlap]
+            out.append({"region": ra, "size": len(sa), "best": best,
+                        "best_jaccard": best_j, "also": also})
+        return out
+
+    @staticmethod
+    def _partition_scores(labels_a: List[str], labels_b: List[str]) -> dict:
+        """ARI, NMI, homogeneity, completeness, V-measure from the contingency table
+        of two label lists (pure numpy). A profile compared with itself -> all 1.0."""
+        ua = {v: i for i, v in enumerate(dict.fromkeys(labels_a))}
+        ub = {v: i for i, v in enumerate(dict.fromkeys(labels_b))}
+        a = np.fromiter((ua[v] for v in labels_a), dtype=np.int64, count=len(labels_a))
+        b = np.fromiter((ub[v] for v in labels_b), dtype=np.int64, count=len(labels_b))
+        n = len(a)
+        C = np.zeros((len(ua), len(ub)), dtype=np.float64)
+        np.add.at(C, (a, b), 1.0)
+        a_sums, b_sums = C.sum(axis=1), C.sum(axis=0)
+
+        def comb2(x):
+            return x * (x - 1.0) / 2.0
+
+        # Adjusted Rand Index
+        sum_c = comb2(C).sum()
+        sa, sb = comb2(a_sums).sum(), comb2(b_sums).sum()
+        tot = comb2(np.array([float(n)]))[0]
+        expected = (sa * sb / tot) if tot > 0 else 0.0
+        denom = 0.5 * (sa + sb) - expected
+        ari = 1.0 if denom == 0 else float((sum_c - expected) / denom)
+
+        # entropies + mutual information (natural log)
+        def entropy(sums):
+            p = sums[sums > 0] / n
+            return float(-(p * np.log(p)).sum())
+
+        h_a, h_b = entropy(a_sums), entropy(b_sums)
+        nz = C > 0
+        mi = float((C[nz] / n * np.log(C[nz] * n / (a_sums[:, None] * b_sums[None, :])[nz])).sum())
+        homogeneity = 1.0 if h_a == 0 else mi / h_a
+        completeness = 1.0 if h_b == 0 else mi / h_b
+        v = (0.0 if (homogeneity + completeness) == 0
+             else 2 * homogeneity * completeness / (homogeneity + completeness))
+        nmi = 1.0 if (h_a == 0 and h_b == 0) else (mi / ((h_a + h_b) / 2) if (h_a + h_b) else 0.0)
+        return {"ari": ari, "nmi": nmi, "homogeneity": homogeneity,
+                "completeness": completeness, "v_measure": v}
+
     def spots_with_snvs(self, snvs: List[str]) -> List[str]:
         """Barcodes that carry at least one of the given SNVs (presence > 0)."""
         cols = [s for s in snvs if s in self.matrix.columns]
@@ -407,8 +487,12 @@ class StudyData:
         smaller peak's height above the grow floor. A deep valley keeps them as
         distinct regions. Basins with a seed and >= `min_size` spots become regions.
 
-        Returns {'regions': list[list[barcode]], 'seeds'/'centers': list[barcode]
-                 (one representative center per region, aligned with 'regions'),
+        Returns {'regions': list[list[barcode]],
+                 'centers': list[list[barcode]] (ALL seed centers per region, in
+                   intensity-descending order, aligned with 'regions' — a basin fused
+                   from several seeds keeps every seed so the count exposes how many
+                   sub-peaks the region may contain),
+                 'seeds': list[barcode] (flat union of all centers, for preview rings),
                  'intensity': Series(barcode->smoothed intensity)}.
         """
         bcs, neighbors = self.spot_adjacency()
@@ -442,19 +526,20 @@ class StudyData:
 
         # build output regions; keep basins big enough (every basin has >= 1 seed)
         out: List[List[str]] = []
-        centers: List[str] = []
+        centers: List[List[str]] = []
         for members in basins:
             if len(members) < min_size:
                 continue
             out.append([bcs[m] for m in members])
             seed_members = [m for m in members if seed_mask[m]]
-            pool = seed_members or members
-            center = max(pool, key=lambda m: s[m])   # highest-intensity seed = center
-            centers.append(bcs[center])
+            pool = seed_members or [max(members, key=lambda m: s[m])]
+            pool = sorted(pool, key=lambda m: s[m], reverse=True)   # strongest first
+            centers.append([bcs[m] for m in pool])                 # ALL centers, not one
         order = sorted(range(len(out)), key=lambda i: len(out[i]), reverse=True)
         out = [out[i] for i in order]
         centers = [centers[i] for i in order]
-        return {"regions": out, "seeds": centers, "centers": centers,
+        seeds = [c for cs in centers for c in cs]                  # flat union for preview
+        return {"regions": out, "seeds": seeds, "centers": centers,
                 "intensity": pd.Series(s, index=bcs)}
 
     @staticmethod

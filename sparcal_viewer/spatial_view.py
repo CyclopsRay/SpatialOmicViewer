@@ -113,6 +113,7 @@ class SpatialView(QtWidgets.QWidget):
         self._barcode_region: dict = {}     # barcode -> region name (current profile)
         self._hover_enabled = True
         self._hover_region: Optional[str] = None   # last emitted region (change detection)
+        self._hit_radius = 8.0              # cursor->spot snap radius (set in set_data)
 
         self.glw = pg.GraphicsLayoutWidget()
         self.vb = LassoViewBox(lockAspect=True, invertY=True, enableMenu=False)
@@ -179,6 +180,7 @@ class SpatialView(QtWidgets.QWidget):
         self._barcodes = list(barcodes)
         self._xy = np.asarray(xy, dtype=float)
         size = spot_diameter if spot_diameter and spot_diameter > 0 else 8.0
+        self._hit_radius = self._compute_hit_radius(size)
 
         if self._img_item is not None:
             self.vb.removeItem(self._img_item)
@@ -373,6 +375,64 @@ class SpatialView(QtWidgets.QWidget):
         self._preview.setData([])
         self._seeds.setData([])
 
+    # ------------------------------------------------------- profile export
+    def export_profile_map(self, region_to_bcs: dict, with_background: bool,
+                           path: str) -> str:
+        """Render a 'profile map' — every region in its own colour over a pale
+        tissue, with/without the background image — to a PDF (vector) or PNG file
+        (chosen by extension). Returns the written path ('' on failure)."""
+        self.reset_view()                       # clean canvas: pale base, no overlays
+        n = max(1, len(region_to_bcs))
+        pos = {bc: (self._xy[i, 0], self._xy[i, 1])
+               for i, bc in enumerate(self._barcodes)}
+        size = self._idx_size() * 1.05
+        spots = []
+        for ri, (_name, bcs) in enumerate(region_to_bcs.items()):
+            brush = pg.mkBrush(pg.intColor(ri, hues=n))
+            for bc in bcs:
+                if bc in pos:
+                    spots.append({"pos": pos[bc], "size": size, "brush": brush})
+        self._preview.setData(spots)
+        if self._img_item is not None:
+            self._img_item.setVisible(with_background)
+        QtWidgets.QApplication.processEvents()
+        try:
+            ok = self._render_scene(path)
+        finally:                                # always restore the live view
+            self._preview.setData([])
+            if self._img_item is not None:
+                self._img_item.setVisible(self.bg_toggle.isChecked())
+        return path if ok else ""
+
+    def _render_scene(self, path: str) -> bool:
+        """Paint the ViewBox area of the scene to PNG or vector PDF."""
+        src = self.vb.sceneBoundingRect()
+        if src.width() <= 0 or src.height() <= 0:
+            return False
+        aspect = src.width() / src.height()
+        scene = self.glw.scene()
+        if path.lower().endswith(".pdf"):
+            writer = QtGui.QPdfWriter(path)
+            writer.setResolution(300)
+            win = 8.0                            # 8-inch wide page, height by aspect
+            writer.setPageSize(QtGui.QPageSize(
+                QtCore.QSizeF(win, win / aspect), QtGui.QPageSize.Inch))
+            painter = QtGui.QPainter(writer)
+            target = QtCore.QRectF(painter.viewport())
+            painter.fillRect(target, QtCore.Qt.white)
+            scene.render(painter, target, src)
+            painter.end()
+            return True
+        # PNG (default)
+        w = 2000
+        h = max(1, int(round(w / aspect)))
+        img = QtGui.QImage(w, h, QtGui.QImage.Format_ARGB32)
+        img.fill(QtCore.Qt.white)
+        painter = QtGui.QPainter(img)
+        scene.render(painter, QtCore.QRectF(0, 0, w, h), src)
+        painter.end()
+        return bool(img.save(path))
+
     # ----------------------------------------------------------------- reset
     def reset_view(self) -> None:
         """Clear every overlay/selection and paint all spots a uniform pale white."""
@@ -403,12 +463,30 @@ class SpatialView(QtWidgets.QWidget):
     def _hide_hover_label(self) -> None:
         self._hover_label.setVisible(False)
 
+    def _compute_hit_radius(self, size: float) -> float:
+        """Cursor->spot snap radius: ~0.6 of the spot pitch so a cursor in the gap
+        *between* spots still snaps to the nearest one (Visium pitch > spot size)."""
+        xy = self._xy
+        n = len(xy)
+        if n < 2:
+            return max(size, 8.0)
+        idx = np.arange(n)
+        if n > 400:                                   # subsample for speed
+            idx = np.random.default_rng(0).choice(n, 400, replace=False)
+        nn = np.empty(len(idx))
+        for k, i in enumerate(idx):
+            d2 = (xy[:, 0] - xy[i, 0]) ** 2 + (xy[:, 1] - xy[i, 1]) ** 2
+            d2[i] = np.inf
+            nn[k] = np.sqrt(d2.min())
+        pitch = float(np.median(nn[np.isfinite(nn)])) if len(nn) else size
+        return max(size, pitch) * 0.6
+
     def _nearest_spot(self, x: float, y: float) -> Optional[int]:
         if len(self._barcodes) == 0:
             return None
         d2 = (self._xy[:, 0] - x) ** 2 + (self._xy[:, 1] - y) ** 2
         i = int(np.argmin(d2))
-        r = self._idx_size() * 0.6                    # within ~spot radius
+        r = self._hit_radius
         return i if d2[i] <= r * r else None
 
     def _on_mouse_moved(self, scene_pos) -> None:

@@ -176,6 +176,32 @@ def main():
     assert win.spatial._hover_enabled is True, "hover not restored after Auto close"
     print("auto floating + view-reset OK")
 
+    # --- profile-map export writes a non-empty PNG and PDF ------------------
+    win.data.set_current_profile("Ground Truth")
+    r2b = {r: win.data.region_in_matrix(r) for r in win.data.region_names()}
+    for ext, bg in (("png", False), ("pdf", True)):
+        p = os.path.join(tmp, f"map.{ext}")
+        out = win.spatial.export_profile_map(r2b, bg, p)
+        assert out and os.path.getsize(out) > 1000, f"export failed for {ext}"
+    print("profile-map export OK")
+
+    # --- profile comparison via the Edit/Function path ----------------------
+    win._show_profile_page()
+    win._start_profile_edit()
+    assert win.profile_action_bar.isVisibleTo(win), "compare action bar not shown"
+    from PySide6.QtCore import Qt as _Qt
+    for i in range(win.profile_list.count()):
+        it = win.profile_list.item(i)
+        it.setSelected(it.data(_Qt.UserRole) in ("Ground Truth", "Test"))
+    names = [it.data(_Qt.UserRole) for it in win.profile_list.selectedItems()]
+    assert len(names) == 2
+    res = win.data.compare_profiles(names[0], names[1])
+    assert set(res["scores"]) == {"ari", "nmi", "homogeneity", "completeness", "v_measure"}
+    assert len(res["overlap"]) > 0
+    win._end_profile_edit()
+    assert not win.profile_action_bar.isVisibleTo(win)
+    print("profile compare path OK ->", names, round(res["scores"]["ari"], 3))
+
     win.close()
     shutil.rmtree(tmp)
     print("\nGUI SMOKE TEST PASSED")

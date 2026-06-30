@@ -123,10 +123,19 @@ def main():
     assert lo_spots >= hi_spots, "lower intensity should keep >= spots"
 
     # --- watershed split criterion -----------------------------------------
-    # one center per region, and every center lives inside its own region
+    # centers is a list-of-lists (ALL seed centers per region); each is >=1 and
+    # every center lives inside its own region
     assert len(res["centers"]) == len(regions)
-    for region, ctr in zip(regions, res["centers"]):
-        assert ctr in set(region), "region center is not inside its region!"
+    for region, ctrs in zip(regions, res["centers"]):
+        assert isinstance(ctrs, list) and len(ctrs) >= 1
+        assert set(ctrs) <= set(region), "a region center is not inside its region!"
+    # flat 'seeds' is the union of all centers
+    assert sorted(res["seeds"]) == sorted(c for cs in res["centers"] for c in cs)
+    # a full merge (split_depth=1.0) should yield some multi-center regions
+    res_full = sd.auto_tumor_regions(seed_pct=90, grow_pct=60, min_size=5,
+                                     split_depth=1.0)
+    assert any(len(c) > 1 for c in res_full["centers"]), \
+        "merged basins should keep multiple centers"
     # split_depth=1.0 merges everything that touches -> fewer-or-equal regions
     res_merge = sd.auto_tumor_regions(seed_pct=90, grow_pct=60, min_size=5,
                                       split_depth=1.0)
@@ -174,6 +183,23 @@ def main():
     sd_fresh.delete_profile("Scratch")
     assert "Scratch" not in sd_fresh.profile_names()
     print("profiles CRUD + namespacing + back-compat OK")
+
+    # --- profile comparison (pure-numpy ARI/NMI/V-measure) ------------------
+    self_cmp = sd_fresh.compare_profiles("Ground Truth", "Ground Truth")["scores"]
+    assert abs(self_cmp["ari"] - 1.0) < 1e-9 and abs(self_cmp["v_measure"] - 1.0) < 1e-9
+    cmp = sd_fresh.compare_profiles("Ground Truth", "Test")
+    sc = cmp["scores"]
+    print(f"compare GT vs Test: ARI={sc['ari']:.3f} NMI={sc['nmi']:.3f} "
+          f"homog={sc['homogeneity']:.3f} compl={sc['completeness']:.3f}")
+    assert all(-0.5 <= sc[k] <= 1.0 + 1e-9 for k in
+               ("ari", "nmi", "homogeneity", "completeness", "v_measure"))
+    assert cmp["n_items"] == sd_fresh.matrix.shape[0]
+    ov = cmp["overlap"]
+    assert len(ov) == len(sd_fresh.profiles["Ground Truth"]["regions"])
+    for o in ov:                                  # best match really lives in B
+        if o["best"] is not None:
+            assert o["best"] in sd_fresh.profiles["Test"]["regions"]
+    print("profile comparison OK")
 
     shutil.rmtree(tmp)
     print("\nALL CORE TESTS PASSED")

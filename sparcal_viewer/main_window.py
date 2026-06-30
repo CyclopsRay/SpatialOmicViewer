@@ -62,6 +62,12 @@ class MainWindow(QtWidgets.QMainWindow):
         act_open.setShortcut(QtGui.QKeySequence.Open)
         act_open.triggered.connect(self._open_dialog)
         m.addSeparator()
+        exp = m.addMenu("Export")
+        exp.addAction("Profile map (with background)…",
+                      lambda: self._export_profile_map(True))
+        exp.addAction("Profile map (without background)…",
+                      lambda: self._export_profile_map(False))
+        m.addSeparator()
         m.addAction("Quit", self.close)
 
     def _show_about(self) -> None:
@@ -118,13 +124,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_profile_new = QtWidgets.QPushButton("New")
         self.btn_profile_rename = QtWidgets.QPushButton("Rename")
         self.btn_profile_delete = QtWidgets.QPushButton("Delete")
+        self.btn_profile_edit = QtWidgets.QPushButton("Edit")
         self.btn_profile_new.clicked.connect(self._new_profile)
         self.btn_profile_rename.clicked.connect(self._rename_profile)
         self.btn_profile_delete.clicked.connect(self._delete_profile)
-        for b in (self.btn_profile_new, self.btn_profile_rename, self.btn_profile_delete):
+        self.btn_profile_edit.clicked.connect(self._start_profile_edit)
+        for b in (self.btn_profile_new, self.btn_profile_rename,
+                  self.btn_profile_delete, self.btn_profile_edit):
             bar.addWidget(b)
         bar.addStretch(1)
-        v.addLayout(bar)
+        self.profile_bar = self._wrap_layout(bar)
+        v.addWidget(self.profile_bar)
 
         self.profile_list = QtWidgets.QListWidget()
         self.profile_list.itemDoubleClicked.connect(
@@ -134,6 +144,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_profile_open = QtWidgets.QPushButton("Open profile ▸")
         self.btn_profile_open.clicked.connect(self._open_selected_profile)
         v.addWidget(self.btn_profile_open)
+
+        # Edit-mode action bar: (Function ▾ = Compare) + Done. Hidden by default.
+        abar = QtWidgets.QHBoxLayout()
+        abar.setContentsMargins(0, 0, 0, 0)
+        self.lbl_profile_mode = QtWidgets.QLabel("Pick two profiles")
+        abar.addWidget(self.lbl_profile_mode)
+        abar.addStretch(1)
+        self.btn_profile_func = QtWidgets.QPushButton("Function ▾")
+        self.btn_profile_func.clicked.connect(self._show_profile_function_menu)
+        self.btn_profile_done = QtWidgets.QPushButton("Done")
+        self.btn_profile_done.clicked.connect(self._end_profile_edit)
+        abar.addWidget(self.btn_profile_func)
+        abar.addWidget(self.btn_profile_done)
+        self.profile_action_bar = self._wrap_layout(abar)
+        self.profile_action_bar.setVisible(False)
+        v.addWidget(self.profile_action_bar)
+        return w
+
+    @staticmethod
+    def _wrap_layout(layout) -> QtWidgets.QWidget:
+        w = QtWidgets.QWidget()
+        w.setLayout(layout)
         return w
 
     # ---- column 2, page 1: regions of the current profile ---------------
@@ -303,6 +335,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _show_profile_page(self) -> None:
         """Return to the profile-selection page (the '‹ Profiles' back-button)."""
         self._cancel_region_mode()
+        self._end_profile_edit()
         self._reset_view()
         self._refresh_profile_list()
         self.col2_stack.setCurrentIndex(0)
@@ -311,6 +344,7 @@ class MainWindow(QtWidgets.QMainWindow):
         name = self._selected_profile_name()
         if not name or not self.data:
             return
+        self._end_profile_edit()
         self.data.set_current_profile(name)
         self._enter_region_page()
 
@@ -356,6 +390,41 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.data.delete_profile(name)
         self._refresh_profile_list()
+
+    # ---- profile edit mode: multi-select + Function ▸ Compare ------------
+    def _start_profile_edit(self) -> None:
+        if not self.data or len(self.data.profile_names()) < 2:
+            QtWidgets.QMessageBox.information(
+                self, "Compare", "Need at least two profiles to compare.")
+            return
+        self.profile_list.setSelectionMode(
+            QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.profile_bar.setVisible(False)
+        self.btn_profile_open.setVisible(False)
+        self.profile_action_bar.setVisible(True)
+
+    def _end_profile_edit(self) -> None:
+        self.profile_list.setSelectionMode(
+            QtWidgets.QAbstractItemView.SingleSelection)
+        self.profile_action_bar.setVisible(False)
+        self.profile_bar.setVisible(True)
+        self.btn_profile_open.setVisible(True)
+
+    def _show_profile_function_menu(self) -> None:
+        menu = QtWidgets.QMenu(self)
+        menu.addAction("Compare profiles (ARI / overlap)…", self._compare_profiles)
+        menu.exec(self.btn_profile_func.mapToGlobal(
+            self.btn_profile_func.rect().bottomLeft()))
+
+    def _compare_profiles(self) -> None:
+        names = [it.data(QtCore.Qt.UserRole)
+                 for it in self.profile_list.selectedItems()]
+        if len(names) != 2:
+            QtWidgets.QMessageBox.information(
+                self, "Compare", "Select exactly two profiles to compare.")
+            return
+        result = self.data.compare_profiles(names[0], names[1])
+        CompareResultDialog(self, result).exec()
 
     # ============================================================ region tree
     def _refresh_region_tree(self) -> None:
@@ -421,6 +490,34 @@ class MainWindow(QtWidgets.QMainWindow):
         if region and region in self.data.regions:
             self._select_tree_region(region)
             self._highlight_region(region)
+
+    def _export_profile_map(self, with_background: bool) -> None:
+        """Export the current profile's regions (each a distinct colour) to PDF/PNG."""
+        if not self.data:
+            return
+        regions = self.data.region_names()
+        if not regions:
+            QtWidgets.QMessageBox.information(
+                self, "Export", "The current profile has no regions to export.")
+            return
+        region_to_bcs = {r: self.data.region_in_matrix(r) for r in regions}
+        default_dir = os.path.join(self.cfg.root, "outs") if self.cfg else ""
+        if default_dir:
+            os.makedirs(default_dir, exist_ok=True)
+        safe = self.data.current_profile.replace(" ", "_")
+        default_path = os.path.join(default_dir or "", f"{safe}_profile_map.pdf")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Export profile map", default_path, "PDF (*.pdf);;PNG (*.png)")
+        if not path:
+            return
+        if not path.lower().endswith((".pdf", ".png")):
+            path += ".pdf"
+        out = self.spatial.export_profile_map(region_to_bcs, with_background, path)
+        if out:
+            self.statusBar().showMessage(
+                f"Exported {len(regions)}-region map → {out}")
+        else:
+            QtWidgets.QMessageBox.warning(self, "Export", "Could not write the file.")
 
     def _reset_view(self) -> None:
         """Clear every selection (regions/groups/SNVs) → uniform pale-white tissue."""
@@ -821,6 +918,52 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Added region '{rn}' from {len(spots)} spots")
 
 
+class CompareResultDialog(QtWidgets.QDialog):
+    """Show the result of StudyData.compare_profiles: cluster-agreement scores
+    plus a per-region best-match Jaccard overlap table."""
+
+    def __init__(self, parent, result: dict):
+        super().__init__(parent)
+        a, b = result["profiles"]
+        self.setWindowTitle(f"Compare profiles: {a} vs {b}")
+        self.resize(580, 480)
+        v = QtWidgets.QVBoxLayout(self)
+        s = result["scores"]
+        head = QtWidgets.QLabel(
+            f'<b>{a}</b> vs <b>{b}</b> — {result["n_items"]} in-tissue spots '
+            f'(unassigned → background)')
+        head.setTextFormat(QtCore.Qt.RichText)
+        v.addWidget(head)
+        scores = QtWidgets.QLabel(
+            f"ARI <b>{s['ari']:.3f}</b> &nbsp; NMI <b>{s['nmi']:.3f}</b><br>"
+            f"homogeneity <b>{s['homogeneity']:.3f}</b> "
+            f"— does a '{b}' region mix several '{a}' regions?<br>"
+            f"completeness <b>{s['completeness']:.3f}</b> "
+            f"— was an '{a}' region split across '{b}'?<br>"
+            f"V-measure <b>{s['v_measure']:.3f}</b>")
+        scores.setTextFormat(QtCore.Qt.RichText)
+        v.addWidget(scores)
+        v.addWidget(QtWidgets.QLabel(
+            f"<b>Region overlap</b> — each '{a}' region → best '{b}' match:"))
+        ov = result["overlap"]
+        tbl = QtWidgets.QTableWidget(len(ov), 4)
+        tbl.setHorizontalHeaderLabels([f"{a} region", "spots", f"best {b}", "Jaccard"])
+        for r, o in enumerate(ov):
+            best = o["best"] or "—"
+            if o["also"]:
+                best += f"  (+{len(o['also'])} more)"
+            for c, val in enumerate((str(o["region"]), str(o["size"]), best,
+                                     f"{o['best_jaccard']:.2f}")):
+                tbl.setItem(r, c, QtWidgets.QTableWidgetItem(val))
+        tbl.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        tbl.resizeColumnsToContents()
+        v.addWidget(tbl, 1)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        bb.rejected.connect(self.reject)
+        bb.accepted.connect(self.accept)
+        v.addWidget(bb)
+
+
 class ThresholdDialog(QtWidgets.QDialog):
     """max (inside %) / min (outside %) for exclusive-by-threshold."""
 
@@ -1025,7 +1168,7 @@ class AutoTumorDialog(QtWidgets.QDialog):
         created = [
             self.data.add_region(
                 f"{base}_{i + 1}", r,
-                center=[centers[i]] if i < len(centers) and centers[i] else None)
+                center=centers[i] if i < len(centers) and centers[i] else None)
             for i, r in enumerate(regions)]
         self.main._refresh_region_tree()
         self.main.statusBar().showMessage(
