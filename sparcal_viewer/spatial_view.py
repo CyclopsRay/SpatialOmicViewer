@@ -12,6 +12,7 @@ import pyqtgraph as pg
 pg.setConfigOptions(imageAxisOrder="row-major", antialias=True)
 
 BASE_BRUSH = pg.mkBrush(180, 180, 180, 140)
+PALE_BRUSH = pg.mkBrush(245, 245, 245, 150)     # uniform near-white (Reset / clean view)
 BASE_PEN = pg.mkPen(90, 90, 90, 120)
 HILITE_BRUSH = pg.mkBrush(231, 76, 60, 220)     # red
 HILITE_PEN = pg.mkPen(150, 20, 20, 255)
@@ -97,6 +98,7 @@ class SpatialView(QtWidgets.QWidget):
     """Left column: tissue image + spots. Emits selectionChanged on lasso."""
 
     selectionChanged = QtCore.Signal(list)  # list[str] barcodes
+    hoveredRegion = QtCore.Signal(object)   # region name (str) or None — change-only
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -107,11 +109,16 @@ class SpatialView(QtWidgets.QWidget):
         self._color_mode = False
         self._legend: Optional[pg.GradientLegend] = None
         self._sel_legend: Optional[TitledGradientLegend] = None  # per-selection legend
+        # hover-to-identify state
+        self._barcode_region: dict = {}     # barcode -> region name (current profile)
+        self._hover_enabled = True
+        self._hover_region: Optional[str] = None   # last emitted region (change detection)
 
         self.glw = pg.GraphicsLayoutWidget()
         self.vb = LassoViewBox(lockAspect=True, invertY=True, enableMenu=False)
         self.glw.addItem(self.vb)
         self.vb.sigLassoFinished.connect(self._on_lasso)
+        self.glw.scene().sigMouseMoved.connect(self._on_mouse_moved)
 
         self._spots = pg.ScatterPlotItem(pxMode=False, brush=BASE_BRUSH, pen=BASE_PEN)
         self._spots.setZValue(10)
@@ -127,11 +134,17 @@ class SpatialView(QtWidgets.QWidget):
                                            brush=pg.mkBrush(255, 255, 0, 255),
                                            pen=pg.mkPen(0, 0, 0, 255, width=1.5))
         self._centers.setZValue(30)
+        # floating label that names the region under the cursor (hover-to-identify)
+        self._hover_label = pg.TextItem(color=(20, 20, 20), anchor=(0, 0.5),
+                                        fill=pg.mkBrush(255, 255, 255, 220))
+        self._hover_label.setZValue(60)
+        self._hover_label.setVisible(False)
         self.vb.addItem(self._spots)
         self.vb.addItem(self._preview)
         self.vb.addItem(self._hilite)
         self.vb.addItem(self._seeds)
         self.vb.addItem(self._centers)
+        self.vb.addItem(self._hover_label)
 
         # tiny background toggle, top-right overlay
         self.bg_toggle = QtWidgets.QCheckBox("background", self)
@@ -148,6 +161,13 @@ class SpatialView(QtWidgets.QWidget):
             "QCheckBox{background:rgba(255,255,255,180);padding:2px 4px;"
             "border-radius:3px;font-size:10px;}")
         self.color_toggle.toggled.connect(self.set_color_mode)
+
+        # Reset button, top-left overlay: clears everything to a pale-white tissue.
+        self.btn_reset = QtWidgets.QPushButton("Reset", self)
+        self.btn_reset.setStyleSheet(
+            "QPushButton{background:rgba(255,255,255,200);padding:2px 8px;"
+            "border:1px solid #aaa;border-radius:3px;font-size:10px;}")
+        self.btn_reset.clicked.connect(self.reset_view)
 
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -178,6 +198,8 @@ class SpatialView(QtWidgets.QWidget):
         self._hilite.setData([])
         self.clear_centers()
         self._remove_sel_legend()
+        self._hide_hover_label()
+        self._hover_region = None
         self._burden = None
         self._apply_color_mode()
         self.vb.autoRange()
@@ -351,10 +373,73 @@ class SpatialView(QtWidgets.QWidget):
         self._preview.setData([])
         self._seeds.setData([])
 
+    # ----------------------------------------------------------------- reset
+    def reset_view(self) -> None:
+        """Clear every overlay/selection and paint all spots a uniform pale white."""
+        self.clear_highlight()
+        self.clear_centers()
+        self.clear_preview()
+        self._remove_sel_legend()
+        self._remove_legend()
+        self._color_mode = False
+        if self.color_toggle.isChecked():
+            self.color_toggle.setChecked(False)
+        self._hide_hover_label()
+        self._spots.setBrush(PALE_BRUSH)
+
+    # ----------------------------------------------------- hover-to-identify
+    def set_hover_regions(self, mapping: dict) -> None:
+        """Provide the barcode -> region-name lookup for the current profile."""
+        self._barcode_region = dict(mapping or {})
+        self._hover_region = None
+
+    def set_hover_enabled(self, enabled: bool) -> None:
+        self._hover_enabled = bool(enabled)
+        if not enabled:
+            self._hide_hover_label()
+            if self._hover_region is not None:
+                self._hover_region = None
+
+    def _hide_hover_label(self) -> None:
+        self._hover_label.setVisible(False)
+
+    def _nearest_spot(self, x: float, y: float) -> Optional[int]:
+        if len(self._barcodes) == 0:
+            return None
+        d2 = (self._xy[:, 0] - x) ** 2 + (self._xy[:, 1] - y) ** 2
+        i = int(np.argmin(d2))
+        r = self._idx_size() * 0.6                    # within ~spot radius
+        return i if d2[i] <= r * r else None
+
+    def _on_mouse_moved(self, scene_pos) -> None:
+        if not self._hover_enabled or self.vb.lasso_enabled or len(self._barcodes) == 0:
+            return
+        if not self.vb.sceneBoundingRect().contains(scene_pos):
+            self._set_hover_region(None)
+            return
+        p = self.vb.mapSceneToView(scene_pos)
+        i = self._nearest_spot(p.x(), p.y())
+        region = self._barcode_region.get(self._barcodes[i]) if i is not None else None
+        if region:
+            self._hover_label.setText(region)
+            self._hover_label.setPos(p.x() + self._idx_size() * 0.8, p.y())
+            self._hover_label.setVisible(True)
+        else:
+            self._hide_hover_label()
+        self._set_hover_region(region)
+
+    def _set_hover_region(self, region: Optional[str]) -> None:
+        """Emit hoveredRegion only when the region under the cursor changes."""
+        if region != self._hover_region:
+            self._hover_region = region
+            self.hoveredRegion.emit(region)
+
     # ------------------------------------------------------------ selection
     def set_selection_mode(self, enabled: bool) -> None:
         self.vb.set_lasso(enabled)
-        if not enabled:
+        if enabled:
+            self._hide_hover_label()      # no region naming while lassoing
+        else:
             self.clear_highlight()
 
     def _on_lasso(self, pts) -> None:
@@ -382,3 +467,6 @@ class SpatialView(QtWidgets.QWidget):
         self.color_toggle.move(self.width() - self.color_toggle.width() - m,
                                m + self.bg_toggle.height() + 4)
         self.color_toggle.raise_()
+        self.btn_reset.adjustSize()
+        self.btn_reset.move(m, m)            # top-left
+        self.btn_reset.raise_()

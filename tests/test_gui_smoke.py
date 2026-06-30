@@ -132,6 +132,50 @@ def main():
     assert _sv.__version__ and _sv.build_time(), "version/build_time missing"
     print("About action present; version", _sv.__version__, "build", _sv.build_time())
 
+    # --- profiles: selection page ↔ region page ----------------------------
+    from PySide6 import QtCore as _QC
+    win._show_profile_page()
+    assert win.col2_stack.currentIndex() == 0, "back-button did not show profile page"
+    assert win.profile_list.count() == len(win.data.profile_names())
+    # open the first profile -> region page titled with its name
+    target = win.data.profile_names()[0]
+    for i in range(win.profile_list.count()):
+        if win.profile_list.item(i).data(_QC.Qt.UserRole) == target:
+            win.profile_list.setCurrentRow(i)
+            break
+    win._open_selected_profile()
+    assert win.col2_stack.currentIndex() == 1, "opening a profile did not show region page"
+    assert target in win.region_title.text() and win.data.current_profile == target
+    print("profile switch OK ->", target)
+
+    # --- hover-to-identify: change-only selects the region in column 2 ------
+    if win.region_tree.topLevelItemCount():
+        from sparcal_viewer.main_window import ROLE_REGION as _RR
+        rname = win.region_tree.topLevelItem(0).data(0, _RR)
+        win.spatial.set_hover_enabled(True)
+        win._on_hover_region(rname)
+        cur = win.region_tree.currentItem()
+        assert cur is not None and cur.data(0, _RR) == rname, "hover did not select region"
+        assert len(win.spatial._hilite.data) > 0, "hover did not highlight the region"
+        print("hover-identify OK ->", rname)
+
+    # --- reset: clears selection and paints the pale base -------------------
+    from sparcal_viewer.spatial_view import PALE_BRUSH
+    win._reset_view()
+    assert win.snv_list.count() == 0 and win.region_tree.currentItem() is None
+    assert len(win.spatial._hilite.data) == 0 and len(win.spatial._centers.data) == 0
+    assert win.spatial._spots.opts["brush"] is PALE_BRUSH, "reset did not pale the spots"
+    print("reset OK")
+
+    # --- Auto dialog floats on top and resets the view ----------------------
+    win._open_auto_dialog()
+    adlg = win._auto_dialog
+    assert bool(adlg.windowFlags() & _QC.Qt.WindowStaysOnTopHint), "auto not always-on-top"
+    assert win.spatial._hover_enabled is False, "hover not suppressed while Auto open"
+    adlg.close()
+    assert win.spatial._hover_enabled is True, "hover not restored after Auto close"
+    print("auto floating + view-reset OK")
+
     win.close()
     shutil.rmtree(tmp)
     print("\nGUI SMOKE TEST PASSED")

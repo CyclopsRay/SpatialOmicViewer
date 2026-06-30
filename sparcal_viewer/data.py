@@ -17,6 +17,9 @@ import pandas as pd
 
 from .config import StudyConfig
 
+# Profile used when a study's CSVs carry no `profile` column (back-compat).
+DEFAULT_PROFILE = "Default"
+
 # Variant-group types and their tag colours (used by the GUI).
 GROUP_EXCLUSIVE = "exclusive"
 GROUP_GENERAL = "general"
@@ -58,14 +61,49 @@ class StudyData:
         # cached spot adjacency: (plot-order barcodes, list[np.ndarray] neighbor idx)
         self._adj: Optional[tuple] = None
 
-        # tumor regions: name -> ordered list of barcodes
-        self.regions: Dict[str, List[str]] = {}
-        # auto-detected region centers: name -> list of center barcodes (seed spots)
-        self.region_centers: Dict[str, List[str]] = {}
-        # variant groups keyed by (region, group_name)
-        self.variant_groups: Dict[tuple, VariantGroup] = {}
+        # Profiles: a profile is a named separation of the tissue into regions
+        # (e.g. "Ground Truth", "Test"). Each profile namespaces its own regions,
+        # centers, and variant groups, so region names may repeat across profiles.
+        # profile name -> {"regions", "region_centers", "variant_groups"}
+        self.profiles: Dict[str, dict] = {}
+        self.current_profile: str = DEFAULT_PROFILE
+        # barcode -> region cache, keyed by profile name (built lazily for hover)
+        self._barcode_region: Dict[str, Dict[str, str]] = {}
 
         self._load()
+
+    # --------------------------------------------------- profile proxies
+    # The GUI was written against flat region/center/group dicts; these proxy to
+    # the *current* profile so existing call sites keep working unchanged.
+    def _cur(self) -> dict:
+        prof = self.profiles.setdefault(
+            self.current_profile,
+            {"regions": {}, "region_centers": {}, "variant_groups": {}})
+        return prof
+
+    @property
+    def regions(self) -> Dict[str, List[str]]:
+        return self._cur()["regions"]
+
+    @regions.setter
+    def regions(self, value: Dict[str, List[str]]) -> None:
+        self._cur()["regions"] = value
+
+    @property
+    def region_centers(self) -> Dict[str, List[str]]:
+        return self._cur()["region_centers"]
+
+    @region_centers.setter
+    def region_centers(self, value: Dict[str, List[str]]) -> None:
+        self._cur()["region_centers"] = value
+
+    @property
+    def variant_groups(self) -> Dict[tuple, VariantGroup]:
+        return self._cur()["variant_groups"]
+
+    @variant_groups.setter
+    def variant_groups(self, value: Dict[tuple, VariantGroup]) -> None:
+        self._cur()["variant_groups"] = value
 
     # ------------------------------------------------------------------ load
     def _load(self) -> None:
@@ -114,39 +152,58 @@ class StudyData:
             df[umi].astype(float).values, index=df[bc].astype(str).values)
         self.coverage = self.coverage[~self.coverage.index.duplicated(keep="first")]
 
+    def _profile_bucket(self, name: str) -> dict:
+        """Return (creating if needed) the per-profile container of dicts."""
+        return self.profiles.setdefault(
+            name, {"regions": {}, "region_centers": {}, "variant_groups": {}})
+
+    @staticmethod
+    def _with_profile(df: pd.DataFrame) -> pd.DataFrame:
+        """Ensure a usable `profile` column (back-compat: missing -> Default)."""
+        if "profile" not in df.columns:
+            df["profile"] = DEFAULT_PROFILE
+        df["profile"] = df["profile"].fillna(DEFAULT_PROFILE).replace("", DEFAULT_PROFILE)
+        return df
+
     def _load_regions(self) -> None:
-        self.regions = {}
+        self.profiles = {}
+        self._barcode_region = {}
         path = self.cfg.tumor_groups
         if path and os.path.exists(path) and os.path.getsize(path) > 0:
             df = pd.read_csv(path, dtype=str)
             if {"region_name", "barcode"}.issubset(df.columns):
-                for name, sub in df.groupby("region_name", sort=False):
-                    self.regions[str(name)] = list(dict.fromkeys(sub["barcode"].tolist()))
+                df = self._with_profile(df)
+                for (prof, name), sub in df.groupby(["profile", "region_name"], sort=False):
+                    self._profile_bucket(str(prof))["regions"][str(name)] = \
+                        list(dict.fromkeys(sub["barcode"].tolist()))
+        if not self.profiles:                      # empty study -> one default profile
+            self._profile_bucket(DEFAULT_PROFILE)
+        self.current_profile = next(iter(self.profiles))
 
     def _load_centers(self) -> None:
         """Load per-region center barcodes (auto-region seeds) if present."""
-        self.region_centers = {}
         path = self.cfg.tumor_centers
         if path and os.path.exists(path) and os.path.getsize(path) > 0:
             df = pd.read_csv(path, dtype=str)
             if {"region_name", "barcode"}.issubset(df.columns):
-                for name, sub in df.groupby("region_name", sort=False):
-                    self.region_centers[str(name)] = list(
-                        dict.fromkeys(sub["barcode"].tolist()))
+                df = self._with_profile(df)
+                for (prof, name), sub in df.groupby(["profile", "region_name"], sort=False):
+                    self._profile_bucket(str(prof))["region_centers"][str(name)] = \
+                        list(dict.fromkeys(sub["barcode"].tolist()))
 
     def _load_variant_groups(self) -> None:
-        self.variant_groups = {}
         path = self.cfg.variant_groups
         if path and os.path.exists(path) and os.path.getsize(path) > 0:
             df = pd.read_csv(path, dtype=str)
             need = {"region_name", "group_name", "group_type", "snv_key"}
             if need.issubset(df.columns):
-                for (region, gname, gtype), sub in df.groupby(
-                    ["region_name", "group_name", "group_type"], sort=False
+                df = self._with_profile(df)
+                for (prof, region, gname, gtype), sub in df.groupby(
+                    ["profile", "region_name", "group_name", "group_type"], sort=False
                 ):
                     g = VariantGroup(str(region), str(gname), str(gtype),
                                      list(dict.fromkeys(sub["snv_key"].tolist())))
-                    self.variant_groups[(g.region, g.name)] = g
+                    self._profile_bucket(str(prof))["variant_groups"][(g.region, g.name)] = g
 
     # ------------------------------------------------------------- accessors
     @property
@@ -167,6 +224,73 @@ class StudyData:
 
     def groups_for_region(self, region: str) -> List[VariantGroup]:
         return [g for (r, _), g in self.variant_groups.items() if r == region]
+
+    # ------------------------------------------------------------- profiles
+    def profile_names(self) -> List[str]:
+        return list(self.profiles.keys())
+
+    def set_current_profile(self, name: str) -> None:
+        if name in self.profiles:
+            self.current_profile = name
+
+    def add_profile(self, name: str) -> str:
+        name = self._unique_profile_name(name)
+        self._profile_bucket(name)
+        self.current_profile = name
+        self.save_regions()           # persist the (empty) profile so it survives reload
+        return name
+
+    def rename_profile(self, old: str, new: str) -> str:
+        if old not in self.profiles:
+            return old
+        new = self._unique_profile_name(new, ignore=old)
+        self.profiles = {(new if k == old else k): v for k, v in self.profiles.items()}
+        if self.current_profile == old:
+            self.current_profile = new
+        self._barcode_region.pop(old, None)
+        self._save_all()
+        return new
+
+    def delete_profile(self, name: str) -> None:
+        if name not in self.profiles:
+            return
+        del self.profiles[name]
+        self._barcode_region.pop(name, None)
+        if not self.profiles:                       # never leave zero profiles
+            self._profile_bucket(DEFAULT_PROFILE)
+        if self.current_profile not in self.profiles:
+            self.current_profile = next(iter(self.profiles))
+        self._save_all()
+
+    def _unique_profile_name(self, name: str, ignore: Optional[str] = None) -> str:
+        name = (name or "profile").strip() or "profile"
+        existing = {k for k in self.profiles if k != ignore}
+        if name not in existing:
+            return name
+        i = 2
+        while f"{name}_{i}" in existing:
+            i += 1
+        return f"{name}_{i}"
+
+    def region_counts(self) -> Dict[str, int]:
+        """Region count per profile (for the profile-selection list)."""
+        return {p: len(b["regions"]) for p, b in self.profiles.items()}
+
+    def barcode_region_map(self, profile: Optional[str] = None) -> Dict[str, str]:
+        """barcode -> region name for the given profile (default: current). When a
+        spot belongs to several regions the *smallest* region wins (most specific).
+        Cached per profile; invalidated on any region edit."""
+        prof = profile or self.current_profile
+        if prof in self._barcode_region:
+            return self._barcode_region[prof]
+        regions = self.profiles.get(prof, {}).get("regions", {})
+        # assign in descending size order so smaller regions overwrite larger ones
+        out: Dict[str, str] = {}
+        for name in sorted(regions, key=lambda n: len(regions[n]), reverse=True):
+            for bc in regions[name]:
+                out[bc] = name
+        self._barcode_region[prof] = out
+        return out
 
     def spots_with_snvs(self, snvs: List[str]) -> List[str]:
         """Barcodes that carry at least one of the given SNVs (presence > 0)."""
@@ -524,22 +648,34 @@ class StudyData:
         return f"{name}_{i}"
 
     # ------------------------------------------------------------- persistence
+    def _save_all(self) -> None:
+        self.save_regions()
+        self.save_centers()
+        self.save_variant_groups()
+
     def save_regions(self) -> None:
-        rows = [(name, bc) for name, bcs in self.regions.items() for bc in bcs]
-        df = pd.DataFrame(rows, columns=["region_name", "barcode"])
+        self._barcode_region = {}            # region edits invalidate the hover map
+        rows = [(prof, name, bc)
+                for prof, b in self.profiles.items()
+                for name, bcs in b["regions"].items() for bc in bcs]
+        df = pd.DataFrame(rows, columns=["profile", "region_name", "barcode"])
         df.to_csv(self.cfg.tumor_groups, index=False)
 
     def save_centers(self) -> None:
-        rows = [(name, bc) for name, bcs in self.region_centers.items() for bc in bcs]
-        df = pd.DataFrame(rows, columns=["region_name", "barcode"])
+        rows = [(prof, name, bc)
+                for prof, b in self.profiles.items()
+                for name, bcs in b["region_centers"].items() for bc in bcs]
+        df = pd.DataFrame(rows, columns=["profile", "region_name", "barcode"])
         df.to_csv(self.cfg.tumor_centers, index=False)
 
     def save_variant_groups(self) -> None:
         rows = []
-        for g in self.variant_groups.values():
-            for s in g.snvs:
-                rows.append((g.region, g.name, g.gtype, s))
-        df = pd.DataFrame(rows, columns=["region_name", "group_name", "group_type", "snv_key"])
+        for prof, b in self.profiles.items():
+            for g in b["variant_groups"].values():
+                for s in g.snvs:
+                    rows.append((prof, g.region, g.name, g.gtype, s))
+        df = pd.DataFrame(
+            rows, columns=["profile", "region_name", "group_name", "group_type", "snv_key"])
         df.to_csv(self.cfg.variant_groups, index=False)
 
     @staticmethod

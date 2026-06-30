@@ -146,6 +146,35 @@ def main():
         "region center did not round-trip through CSV"
     print("region-center persistence OK")
 
+    # --- profiles -----------------------------------------------------------
+    import pandas as pd
+    sd_fresh = StudyData(cfg)                  # re-read the migrated temp study
+    profs = set(sd_fresh.profile_names())
+    print(f"profiles: {sorted(profs)}  counts={sd_fresh.region_counts()}")
+    assert {"Ground Truth", "Test", "Other"}.issubset(profs)
+    assert sd_fresh.region_counts()["Test"] == 16
+    # region namespacing: switching profile changes the visible region set
+    sd_fresh.set_current_profile("Test")
+    assert all(r.startswith("Test_") for r in sd_fresh.region_names())
+    sd_fresh.set_current_profile("Ground Truth")
+    assert "T1" in sd_fresh.region_names()
+    # back-compat: a profile-less frame loads into the Default profile
+    demo = pd.DataFrame({"region_name": ["A", "A"], "barcode": ["b1", "b2"]})
+    assert (StudyData._with_profile(demo.copy())["profile"] == "Default").all()
+    # barcode_region_map: each mapped spot really lives in the region it names
+    m = sd_fresh.barcode_region_map("Ground Truth")
+    regs = sd_fresh.profiles["Ground Truth"]["regions"]
+    for bc, rn in list(m.items())[:100]:
+        assert bc in regs[rn]
+    # profile CRUD (name clash uniquifies)
+    p = sd_fresh.add_profile("Ground Truth")
+    assert p != "Ground Truth" and p in sd_fresh.profile_names()
+    sd_fresh.rename_profile(p, "Scratch")
+    assert "Scratch" in sd_fresh.profile_names() and p not in sd_fresh.profile_names()
+    sd_fresh.delete_profile("Scratch")
+    assert "Scratch" not in sd_fresh.profile_names()
+    print("profiles CRUD + namespacing + back-compat OK")
+
     shutil.rmtree(tmp)
     print("\nALL CORE TESTS PASSED")
 

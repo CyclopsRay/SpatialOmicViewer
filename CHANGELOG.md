@@ -4,6 +4,24 @@ Version history for the SPARCAL Spatial-SNV Viewer. The running version is
 `sparcal_viewer.__version__`; the About dialog (click the app name on the top
 bar) shows it alongside the build time.
 
+## 0.5.0
+- **Tumor profiles:** Regions are now organized into named *profiles* (separate
+  separations of the tissue — e.g. "Ground Truth", "Test", auto-detected). Column 2
+  has a new top layer: pick a profile, then its regions; the region view is titled
+  `Tumor profile: "<name>"` with a `‹ Profiles` back-button. New/Rename/Delete
+  profile management. Persistence adds a `profile` column to `tumor_groups.csv`,
+  `tumor_centers.csv`, and `variant_groups.csv`; files without it load into a
+  single `Default` profile (back-compatible). DCIS_2 ships as Ground Truth
+  (T1–T11), Test (Test_1–Test_16), and Other (ALL, T3Eexclusive).
+- **Reset:** new top-left button on the spatial view clears all region/group/SNV
+  selection and paints every spot a uniform pale white.
+- **Auto regions — clearer view:** opening the Auto dialog resets the tissue so
+  the coloured region preview reads against a blank background, and the dialog now
+  always floats on top of the main window.
+- **Hover-to-identify:** in normal mode, hovering a spot shows its region name as
+  a label at the cursor and selects/shows that region in column 2 (live, updating
+  only when the hovered region changes).
+
 ## 0.4.0
 - **Region/group edit selection:** Edit mode now uses extended selection so
   **Shift-click selects a contiguous range** and Ctrl/Cmd-click toggles

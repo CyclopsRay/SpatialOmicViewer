@@ -76,6 +76,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_spatial_pane(self) -> QtWidgets.QWidget:
         self.spatial = SpatialView()
         self.spatial.selectionChanged.connect(self._on_spatial_selection)
+        self.spatial.hoveredRegion.connect(self._on_hover_region)
 
         # Placeholder shown before any study is loaded.
         placeholder = QtWidgets.QWidget()
@@ -96,10 +97,59 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---- column 2 -------------------------------------------------------
     def _build_region_pane(self) -> QtWidgets.QWidget:
+        """Column 2 is a two-page stack: profile selection, then that profile's
+        regions. The page index is toggled by the '‹ Profiles' back-button and by
+        opening a profile."""
+        self.col2_stack = QtWidgets.QStackedWidget()
+        self.col2_stack.addWidget(self._build_profile_page())   # index 0
+        self.col2_stack.addWidget(self._build_region_page())    # index 1
+        self.col2_stack.setCurrentIndex(0)
+        return self.col2_stack
+
+    # ---- column 2, page 0: profile selection ----------------------------
+    def _build_profile_page(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(w)
         v.setContentsMargins(4, 4, 4, 4)
-        v.addWidget(QtWidgets.QLabel("<b>Tumor regions</b>"))
+        v.addWidget(QtWidgets.QLabel("<b>Tumor profiles</b>"))
+
+        bar = QtWidgets.QHBoxLayout()
+        bar.setContentsMargins(0, 0, 0, 0)
+        self.btn_profile_new = QtWidgets.QPushButton("New")
+        self.btn_profile_rename = QtWidgets.QPushButton("Rename")
+        self.btn_profile_delete = QtWidgets.QPushButton("Delete")
+        self.btn_profile_new.clicked.connect(self._new_profile)
+        self.btn_profile_rename.clicked.connect(self._rename_profile)
+        self.btn_profile_delete.clicked.connect(self._delete_profile)
+        for b in (self.btn_profile_new, self.btn_profile_rename, self.btn_profile_delete):
+            bar.addWidget(b)
+        bar.addStretch(1)
+        v.addLayout(bar)
+
+        self.profile_list = QtWidgets.QListWidget()
+        self.profile_list.itemDoubleClicked.connect(
+            lambda *_: self._open_selected_profile())
+        v.addWidget(self.profile_list, 1)
+
+        self.btn_profile_open = QtWidgets.QPushButton("Open profile ▸")
+        self.btn_profile_open.clicked.connect(self._open_selected_profile)
+        v.addWidget(self.btn_profile_open)
+        return w
+
+    # ---- column 2, page 1: regions of the current profile ---------------
+    def _build_region_page(self) -> QtWidgets.QWidget:
+        w = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(w)
+        v.setContentsMargins(4, 4, 4, 4)
+        self.region_title = QtWidgets.QLabel("Tumor profile")
+        self.region_title.setTextFormat(QtCore.Qt.RichText)
+        v.addWidget(self.region_title)
+        self.btn_back_profiles = QtWidgets.QPushButton("‹ Profiles")
+        self.btn_back_profiles.setFlat(True)
+        self.btn_back_profiles.setStyleSheet("text-align:left;color:#2980b9;")
+        self.btn_back_profiles.setMaximumWidth(110)
+        self.btn_back_profiles.clicked.connect(self._show_profile_page)
+        v.addWidget(self.btn_back_profiles)
 
         # normal toolbar: Add / Edit / Generate
         self.region_bar = QtWidgets.QWidget()
@@ -207,7 +257,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spatial.set_data(cfg.hires_image, bcs, xy, data.spot_diameter)
         burden = data.per_spot_burden()
         self.spatial.set_burden(list(burden.index), burden.values)
+        self.spatial.set_hover_regions(data.barcode_region_map())
         self._refresh_region_tree()
+        self._refresh_profile_list()
+        self.col2_stack.setCurrentIndex(0)      # start on profile selection
         self._clear_snvs()
         self.statusBar().showMessage(
             f"{cfg.title()}: {data.matrix.shape[0]} spots × {data.matrix.shape[1]} SNVs")
@@ -227,11 +280,89 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.open_config(p)
                 break
 
+    # ============================================================ profiles
+    def _refresh_profile_list(self) -> None:
+        self.profile_list.clear()
+        if not self.data:
+            return
+        counts = self.data.region_counts()
+        for name in self.data.profile_names():
+            it = QtWidgets.QListWidgetItem(f"{name}  ({counts.get(name, 0)})")
+            it.setData(QtCore.Qt.UserRole, name)
+            f = it.font()
+            f.setBold(True)
+            it.setFont(f)
+            self.profile_list.addItem(it)
+            if name == self.data.current_profile:
+                self.profile_list.setCurrentItem(it)
+
+    def _selected_profile_name(self) -> Optional[str]:
+        it = self.profile_list.currentItem()
+        return it.data(QtCore.Qt.UserRole) if it else None
+
+    def _show_profile_page(self) -> None:
+        """Return to the profile-selection page (the '‹ Profiles' back-button)."""
+        self._cancel_region_mode()
+        self._reset_view()
+        self._refresh_profile_list()
+        self.col2_stack.setCurrentIndex(0)
+
+    def _open_selected_profile(self) -> None:
+        name = self._selected_profile_name()
+        if not name or not self.data:
+            return
+        self.data.set_current_profile(name)
+        self._enter_region_page()
+
+    def _enter_region_page(self) -> None:
+        """Switch to the region view for data.current_profile and refresh it."""
+        self.region_title.setText(
+            f'Tumor profile: "<b>{self.data.current_profile}</b>"')
+        self._refresh_region_tree()
+        self._clear_snvs()
+        self._reset_view()
+        self.spatial.set_hover_regions(self.data.barcode_region_map())
+        self.col2_stack.setCurrentIndex(1)
+
+    def _new_profile(self) -> None:
+        if not self.data:
+            return
+        name, ok = QtWidgets.QInputDialog.getText(self, "New profile", "Profile name:")
+        if not ok:
+            return
+        pn = self.data.add_profile(name)
+        self._refresh_profile_list()
+        self.statusBar().showMessage(f"Created profile '{pn}' — open it to add regions")
+
+    def _rename_profile(self) -> None:
+        name = self._selected_profile_name()
+        if not self.data or not name:
+            return
+        new, ok = QtWidgets.QInputDialog.getText(
+            self, "Rename profile", "New name:", text=name)
+        if not ok:
+            return
+        self.data.rename_profile(name, new)
+        self._refresh_profile_list()
+
+    def _delete_profile(self) -> None:
+        name = self._selected_profile_name()
+        if not self.data or not name:
+            return
+        if QtWidgets.QMessageBox.question(
+                self, "Delete profile",
+                f"Delete profile '{name}' and all its regions and groups?"
+                ) != QtWidgets.QMessageBox.Yes:
+            return
+        self.data.delete_profile(name)
+        self._refresh_profile_list()
+
     # ============================================================ region tree
     def _refresh_region_tree(self) -> None:
         self.region_tree.clear()
         if not self.data:
             return
+        self.spatial.set_hover_regions(self.data.barcode_region_map())
         for name in self.data.region_names():
             top = QtWidgets.QTreeWidgetItem([f"{name}  ({len(self.data.region_in_matrix(name))})"])
             top.setData(0, ROLE_REGION, name)
@@ -263,12 +394,41 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         region = item.data(0, ROLE_REGION)
         if region:
-            self.spatial.clear_highlight()
-            self.spatial.highlight(self.data.region_in_matrix(region), "#f1c40f")
-            # show the saved center(s) for auto-generated regions
-            rows = set(self.data.matrix.index)
-            centers = [c for c in self.data.region_centers.get(region, []) if c in rows]
-            self.spatial.mark_centers(centers)
+            self._highlight_region(region)
+
+    def _highlight_region(self, region: str) -> None:
+        """Highlight a whole region on the tissue + show its saved center(s)."""
+        self.spatial.clear_highlight()
+        self.spatial.highlight(self.data.region_in_matrix(region), "#f1c40f")
+        rows = set(self.data.matrix.index)
+        centers = [c for c in self.data.region_centers.get(region, []) if c in rows]
+        self.spatial.mark_centers(centers)
+
+    def _select_tree_region(self, region: str) -> None:
+        """Select a region's top-level tree item (used by hover-to-identify)."""
+        for i in range(self.region_tree.topLevelItemCount()):
+            top = self.region_tree.topLevelItem(i)
+            if top.data(0, ROLE_REGION) == region:
+                self.region_tree.setCurrentItem(top)
+                return
+
+    def _on_hover_region(self, region: Optional[str]) -> None:
+        """Cursor moved over a spot whose region changed (or left a region)."""
+        # only react in the region view, normal (non-selection, non-edit) mode
+        if (not self.data or self._add_mode or self._edit_mode
+                or self.col2_stack.currentIndex() != 1):
+            return
+        if region and region in self.data.regions:
+            self._select_tree_region(region)
+            self._highlight_region(region)
+
+    def _reset_view(self) -> None:
+        """Clear every selection (regions/groups/SNVs) → uniform pale-white tissue."""
+        self.current_selection = []
+        self.region_tree.clearSelection()
+        self.region_tree.setCurrentItem(None)
+        self._clear_snvs()
+        self.spatial.reset_view()
 
     def _color_spots_by_snvs(self, snvs: List[str], title: str) -> None:
         """Highlight the spots carrying `snvs`, coloured by how many of those SNVs each
@@ -349,6 +509,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._add_mode = True
         self.current_selection = []
+        self.spatial.set_hover_enabled(False)
         self.spatial.set_selection_mode(True)
         self.lbl_mode.setText("Lasso spots, then Finish")
         self.btn_finish.setVisible(True)
@@ -386,11 +547,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._auto_dialog = AutoTumorDialog(self)
         self._auto_dialog.show()
 
+    def set_auto_active(self, active: bool) -> None:
+        """Suppress hover-to-identify while the Auto-regions dialog drives the view."""
+        self.spatial.set_hover_enabled(not active)
+
     # ---- edit / merge / delete -----------------------------------------
     def _start_edit_regions(self) -> None:
         if not self.data or not self.data.region_names():
             return
         self._edit_mode = True
+        self.spatial.set_hover_enabled(False)
         # ExtendedSelection so Shift-click selects a contiguous range and
         # Ctrl/Cmd-click toggles individual items (MultiSelection only toggled
         # one item per click and gave no reliable Shift range-select).
@@ -469,6 +635,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._add_mode = False
         self._edit_mode = False
         self.spatial.set_selection_mode(False)
+        self.spatial.set_hover_enabled(True)
         self.current_selection = []
         self.region_tree.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self._set_region_buttons(True)
@@ -692,6 +859,11 @@ class AutoTumorDialog(QtWidgets.QDialog):
         self.spatial = main.spatial
         self.setWindowTitle("Auto tumor regions")
         self.setModal(False)
+        # always float above the main window so the preview stays visible
+        self.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint, True)
+        # clear the tissue so the colored region preview reads clearly on a blank view
+        main.set_auto_active(True)
+        main._reset_view()
         self._seed_mode = None              # None | "add" | "exclude"
         self.extra_seeds: List[str] = []
         self.excluded_seeds: List[str] = []
@@ -863,5 +1035,6 @@ class AutoTumorDialog(QtWidgets.QDialog):
     def closeEvent(self, ev) -> None:
         self.spatial.set_selection_mode(False)
         self.spatial.clear_preview()
+        self.main.set_auto_active(False)
         self.main._auto_dialog = None
         super().closeEvent(ev)
