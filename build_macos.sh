@@ -34,6 +34,10 @@ source "$VENV/bin/activate"
 pip install --upgrade pip >/dev/null
 pip install -r requirements.txt pyinstaller >/dev/null
 
+echo ">> stamping build time (shown in the app's About dialog)"
+printf 'BUILD_TIME = "%s"\n' "$(date '+%Y-%m-%d %H:%M %Z')" \
+  > sparcal_viewer/_build_info.py
+
 echo ">> running PyInstaller (bundling the $STUDY study)"
 rm -rf build dist
 # Anaconda Python may leak Qt plugin paths into the isolated child processes

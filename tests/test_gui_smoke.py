@@ -115,6 +115,23 @@ def main():
         print("center marker drawn for", auto_names[0])
     assert win._auto_dialog is None, "dialog should clear itself on close"
 
+    # edit mode uses ExtendedSelection so Shift-click range-selects regions/groups
+    from PySide6 import QtWidgets as _QW
+    win._start_edit_regions()
+    assert (win.region_tree.selectionMode()
+            == _QW.QAbstractItemView.ExtendedSelection), "edit mode not ExtendedSelection"
+    win._cancel_region_mode()
+    assert (win.region_tree.selectionMode()
+            == _QW.QAbstractItemView.SingleSelection), "selection mode not reset"
+    print("edit-mode ExtendedSelection OK")
+
+    # About: clickable app-name action on the top bar, reporting version + build time
+    import sparcal_viewer as _sv
+    from sparcal_viewer.main_window import APP_NAME
+    assert APP_NAME in [a.text() for a in win.menuBar().actions()], "no app-name action"
+    assert _sv.__version__ and _sv.build_time(), "version/build_time missing"
+    print("About action present; version", _sv.__version__, "build", _sv.build_time())
+
     win.close()
     shutil.rmtree(tmp)
     print("\nGUI SMOKE TEST PASSED")

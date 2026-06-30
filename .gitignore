@@ -10,6 +10,7 @@ __pycache__/
 *.pyo
 
 # Build / packaging artifacts
+sparcal_viewer/_build_info.py
 .build-venv/
 build/
 dist/

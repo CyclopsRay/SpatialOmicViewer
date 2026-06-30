@@ -16,6 +16,8 @@ from .spatial_view import SpatialView
 ROLE_REGION = QtCore.Qt.UserRole + 1     # region name on a top-level item
 ROLE_GROUP = QtCore.Qt.UserRole + 2      # (region, group_name) on a child item
 
+APP_NAME = "SPARCAL Viewer"              # shown as the clickable name on the top bar
+
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -50,12 +52,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Open a .config file (File ▸ Open, or drag it in).")
 
     def _build_menu(self) -> None:
+        # Clickable app name on the top bar — opens the About dialog.
+        about = self.menuBar().addAction(APP_NAME)
+        about.setMenuRole(QtGui.QAction.NoRole)   # keep it on the bar (don't let macOS relocate)
+        about.triggered.connect(self._show_about)
+
         m = self.menuBar().addMenu("&File")
         act_open = m.addAction("Open config…")
         act_open.setShortcut(QtGui.QKeySequence.Open)
         act_open.triggered.connect(self._open_dialog)
         m.addSeparator()
         m.addAction("Quit", self.close)
+
+    def _show_about(self) -> None:
+        from . import __version__, build_time
+        QtWidgets.QMessageBox.about(
+            self, f"About {APP_NAME}",
+            f"<b>SPARCAL Spatial-SNV Viewer</b><br><br>"
+            f"Version&nbsp;{__version__}<br>"
+            f"Build time:&nbsp;{build_time()}")
 
     # ---- column 1 -------------------------------------------------------
     def _build_spatial_pane(self) -> QtWidgets.QWidget:
@@ -376,7 +391,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.data or not self.data.region_names():
             return
         self._edit_mode = True
-        self.region_tree.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
+        # ExtendedSelection so Shift-click selects a contiguous range and
+        # Ctrl/Cmd-click toggles individual items (MultiSelection only toggled
+        # one item per click and gave no reliable Shift range-select).
+        self.region_tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.lbl_mode.setText("Pick regions or groups, then Merge/Delete")
         self.btn_finish.setVisible(False)
         self.btn_merge.setVisible(True)
