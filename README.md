@@ -36,6 +36,35 @@ The bundled study is copied to a writable per-user folder on first launch
 groups, and centers you create persist. To open a *different* study, just drag
 its `.config` into the window (File ▸ Open).
 
+## Open more example studies
+
+Extra studies are published as zip assets on the
+[**SPARCAL-studies-v1** release](https://github.com/CyclopsRay/SpatialOmicViewer/releases/tag/SPARCAL-studies-v1).
+Each zip is fully self-contained (SNV matrix + Visium image/positions + config),
+so there is nothing else to download.
+
+| Study | Tissue | Notes |
+|---|---|---|
+| `DLPFC_151507_SPARCAL.zip` | DLPFC (spatialLIBD) | ships a **Ground Truth** profile of cortical layers L1–L6 + WM |
+| `DLPFC_151669_SPARCAL.zip` | DLPFC | Ground Truth profile (5 annotated layers for this section) |
+| `DLPFC_151673_SPARCAL.zip` | DLPFC | Ground Truth profile (L1–L6 + WM) |
+| `P4_rep1_SPARCAL.zip` | cSCC P4 (Visium rep1) | tumor section, no preset profile |
+| `P6_rep1_SPARCAL.zip` | cSCC P6 (Visium rep1) | tumor section, no preset profile |
+
+**To open one:**
+1. Download a zip from the release page (or `curl -L -O <asset-url>`).
+2. Unzip it — you get a folder like `DLPFC_151507_SPARCAL/` with a `.config` inside.
+3. **Drag the `.config` onto the viewer window**, or use **File ▸ Open** and pick it.
+
+The DLPFC studies open on the profile list with a **Ground Truth** profile — open
+it to see the layer regions, or use **Edit ▸ Function ▸ Compare** to score another
+profile against it. Anything you add (profiles, regions, groups) is saved back
+into that unzipped folder, so it persists the next time you open the `.config`.
+
+Any study folder that follows the layout in
+[A study config folder](#a-study-config-folder) works the same way — these
+release zips are just prebuilt examples.
+
 ## Get the example data (only to build/run from source)
 
 The `DCIS_2_SPARCAL/` bundle ships in the repo **except** the 235 MB SNV matrix,
