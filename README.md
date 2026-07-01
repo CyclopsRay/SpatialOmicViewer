@@ -1,17 +1,24 @@
 # SPARCAL Spatial-SNV Viewer
 
 A desktop app to explore a spatial SNV presence matrix: a tissue view, tumor
-regions, and per-region variant (SNV) groups.
+**profiles** (named separations of the tissue into regions), and per-region
+variant (SNV) groups.
 
 ```
 ┌──────────────────────┬────────────────────────┬──────────────────────┐
-│  Spatial view        │  Tumor regions         │  SNV list            │
-│  (hires image+spots) │  [Add][Edit][Auto][Gen]│  [Export][Import][⋯] │
-│  ▢ background         │  region                │  chrom_pos_ref…      │
-│  ▢ color by SNV count│   ├─ exclusive 🟪      │  …                   │
-│  ▦ burden legend     │   └─ general   🟩      │                      │
+│  Spatial view        │  Tumor profiles ↔ regions │ SNV list           │
+│  (hires image+spots) │  [New][Rename][Del][Edit] │ [Export][Import][⋯]│
+│  [Reset] ▢ background │   Ground Truth (10)       │ chrom_pos_ref…     │
+│  ▢ color by SNV count│   Test (16)  · Other (2)  │ …                  │
+│  hover → region label│  ── open a profile ──▸    │                    │
+│  ▦ burden legend     │  Tumor profile: "…"  ‹Prof│                    │
+│                      │  [Add][Edit][Auto][Gen ▾] │                    │
+│                      │   region ├ exclusive 🟪   │                    │
+│                      │          └ general   🟩   │                    │
 └──────────────────────┴────────────────────────┴──────────────────────┘
 ```
+
+Click the app name on the top bar (**About**) to see the version and build time.
 
 ## Download & run (no Python)
 
@@ -82,13 +89,16 @@ file (drag it into the app, or File ▸ Open). Example: `DCIS_2_SPARCAL/`.
 | `tissue_positions.csv` | Visium spot coordinates |
 | `tissue_hires_image.png` | background image |
 | `scalefactors_json.json` | Visium scale factors |
-| `tumor_groups.csv` | regions the app saves (`region_name,barcode`) |
-| `variant_groups.csv` | variant groups the app saves (`region_name,group_name,group_type,snv_key`) |
-| `tumor_centers.csv` | center (seed) of each **Auto** region (`region_name,barcode`); highlighted ★ when the region is selected |
+| `tumor_groups.csv` | regions the app saves (`profile,region_name,barcode`) |
+| `variant_groups.csv` | variant groups the app saves (`profile,region_name,group_name,group_type,snv_key`) |
+| `tumor_centers.csv` | center seeds of each **Auto** region (`profile,region_name,barcode`); a region can have several centers, each highlighted ★ when selected |
 | `spot_coverage.csv` *(optional)* | per-spot UMI (`barcode,total_umi`) for coverage-normalized **Auto** tumor detection |
 
 To make a new study, copy the four input files + a `.config` into a new folder
-and edit the header fields. The two CSVs can start as just their header row.
+and edit the header fields. The three saved CSVs can start as just their header
+row. The leading `profile` column groups regions into named profiles; a CSV
+written by an older version (no `profile` column) loads into a single `Default`
+profile automatically.
 
 ### Per-spot coverage (optional, for **Auto** regions)
 
@@ -106,17 +116,35 @@ dialog disables its "Normalize by coverage" checkbox).
 
 ## Using it
 
-**Spatial view (col 1)** — pan/zoom; two toggles top-right:
+**Spatial view (col 1)** — pan/zoom; a **Reset** button top-left and two toggles
+top-right:
+- **Reset** — clear every region/group/SNV selection; the tissue goes uniform
+  pale white (a blank canvas).
 - **background** — show/hide the tissue image.
 - **color by SNV count** — colour each spot by how many SNVs it carries, on a
   **sky-blue → purple** ramp (quantile-scaled so the skewed burden spreads out).
   A legend top-left maps colour to the actual SNV count at each quantile.
+- **Hover to identify** — in normal mode (no lasso), hovering a spot shows its
+  region name as a label at the cursor and selects/shows that region in column 2.
+  The label snaps to the nearest spot even in the gaps between spots.
 
-**Tumor regions (col 2)**
+**Tumor profiles (col 2, top layer)** — a *profile* is a named separation of the
+tissue into regions (e.g. ground-truth annotations, a manual set, or an Auto run).
+Column 2 opens on the profile list:
+- **New / Rename / Delete** a profile.
+- Double-click (or select + **Open profile ▸**) to drop into that profile's
+  regions. A **‹ Profiles** back-button returns to this list.
+- **Edit** → multi-select two profiles → **Function ▾ ▸ Compare profiles** — see
+  [Comparing profiles](#comparing-profiles).
+
+**Tumor regions (col 2, per-profile)** — titled `Tumor profile: "<name>"`:
 - **Add** → lasso spots on the tissue → **Finish** → name the region.
-- **Edit** → multi-select regions → **Merge** (makes a new region, removes the
-  originals, prompts for a name) or **Delete**.
-- **Auto** → auto-detect contiguous tumor regions from SNV-burden intensity:
+- **Edit** → multi-select regions/groups (Shift-click for a range, Ctrl/Cmd-click
+  to toggle) → **Merge** (new region, removes the originals, prompts for a name)
+  or **Delete**.
+- **Auto** → auto-detect contiguous tumor regions from SNV-burden intensity. The
+  Auto window floats over the app and blanks the tissue so the coloured region
+  preview reads clearly.
   - **Intensity** slider — higher keeps fewer / smaller regions.
   - **Grow margin** — how far below the seed threshold a region may grow
     (hysteresis); **Min region size** drops specks.
@@ -128,9 +156,11 @@ dialog disables its "Normalize by coverage" checkbox).
     regions. This is a watershed: each spot is claimed by its nearest peak, and
     two basins fuse only across a shallow saddle.
   - **Add seeds / Exclude (lasso)** — force-add or remove seed spots by lassoing
-    the tissue; the preview updates live. **Create regions** writes them out, and
-    each region's center (its strongest seed) is saved to `tumor_centers.csv` and
-    marked with a ★ whenever you re-select the region.
+    the tissue; the preview updates live. **Create regions** writes them out.
+    Each region keeps **all** its seed centers (not just the strongest), saved to
+    `tumor_centers.csv` and marked with ★ when the region is selected — so a
+    region fused from several peaks shows several stars, a hint that it may be a
+    merge of several underlying regions.
 
   Seeds are high-intensity local maxima; regions flood-fill outward over the
   Visium grid so they stay contiguous (no scattered spots).
@@ -153,9 +183,34 @@ dialog disables its "Normalize by coverage" checkbox).
   carrying the chosen SNVs, coloured by per-spot count with a selection-specific
   legend top-left; **Add spots → region** turns those spots into a new tumor region.
 
-Regions and variant groups are written back to the two CSVs immediately, so they
-reload next time you open the config.
+Profiles, regions, centers, and variant groups are written back to the CSVs
+immediately, so they reload next time you open the config.
 <img width="1503" height="929" alt="image" src="https://github.com/user-attachments/assets/52ea12ce-7124-4ebb-a525-519aa1ea0b61" />
+
+## Comparing profiles
+
+Two profiles are two clusterings of the same spots, so you can measure how well
+they agree. On the profile list: **Edit** → select **exactly two** profiles →
+**Function ▾ ▸ Compare profiles (ARI / overlap)**. The result dialog shows:
+
+- a **region × region overlap** table — for each region in profile A, its
+  best-matching region in profile B by **Jaccard** (`|∩| / |∪|`), so you can see
+  which regions correspond and whether one region spans several others;
+- **cluster-agreement scores**: **ARI**, **NMI**, **homogeneity** (does a
+  B-region mix several A-regions?), **completeness** (was an A-region split across
+  B?), and **V-measure**.
+
+The item set is all in-tissue spots; spots in no region get a shared `background`
+label, and where regions overlap the smallest one wins. Scores are computed in
+pure NumPy (so they work in the packaged app) and match scikit-learn. ARI is
+pairwise — two profiles at a time.
+
+## Exporting a profile map
+
+**File ▸ Export ▸ Profile map (with background)** / **(without background)**
+renders every region of the current profile in its own colour to **PDF** (vector)
+or **PNG**, chosen by the file extension. (Column 3's **Export/Import** separately
+save an SNV *list* as `.json` with its region/group provenance.)
 
 ## Defaults (config `variant_grouping:`)
 
