@@ -4,6 +4,17 @@ Version history for the SPARCAL Spatial-SNV Viewer. The running version is
 `sparcal_viewer.__version__`; the About dialog (click the app name on the top
 bar) shows it alongside the build time.
 
+## 1.0.1
+- **Auto tumor regions — every knob is now a slider + spin box:** Intensity, Grow
+  margin, Min region size, and Split valley depth each pair a drag slider with a
+  spin box, so you can drag, step with the up/down arrows, or type a number; the
+  two stay in sync. New defaults: **Grow margin 10** (was 30) and **Split valley
+  depth 40%** (was 30%).
+- **About dialog now reachable:** the app name on the top bar was a bare menu-bar
+  action, which does not render on macOS's native menu bar. It's now a proper
+  app-name menu whose "About …" item (folded into the application menu on macOS)
+  opens the version/build-time dialog.
+
 ## 1.0.0
 - **Hover hit-radius fix:** the region label now appears even when the cursor is
   in the gap *between* spots — the snap radius is derived from the spot pitch

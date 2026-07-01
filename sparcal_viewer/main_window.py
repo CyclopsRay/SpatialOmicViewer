@@ -52,9 +52,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Open a .config file (File ▸ Open, or drag it in).")
 
     def _build_menu(self) -> None:
-        # Clickable app name on the top bar — opens the About dialog.
-        about = self.menuBar().addAction(APP_NAME)
-        about.setMenuRole(QtGui.QAction.NoRole)   # keep it on the bar (don't let macOS relocate)
+        # App-name menu on the top bar — its "About" item opens the About dialog.
+        # (A bare action added straight to the menu bar does not render on macOS's
+        # native menu bar; it must live inside a menu to be visible/clickable.)
+        app_menu = self.menuBar().addMenu(APP_NAME)
+        about = app_menu.addAction(f"About {APP_NAME}…")
+        about.setMenuRole(QtGui.QAction.AboutRole)   # macOS folds this into the app menu
         about.triggered.connect(self._show_about)
 
         m = self.menuBar().addMenu("&File")
@@ -1014,35 +1017,25 @@ class AutoTumorDialog(QtWidgets.QDialog):
 
         form = QtWidgets.QFormLayout(self)
 
-        self.sl = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.sl.setRange(50, 99)
-        self.sl.setValue(90)
-        self.lbl_intensity = QtWidgets.QLabel("90")
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(self.sl, 1)
-        row.addWidget(self.lbl_intensity)
-        form.addRow("Intensity (higher = fewer spots)", self._wrap(row))
+        # every knob is a slider + spin box (drag, step, or type a number)
+        self.sl, self.sp_intensity, int_row = self._slider_spin(50, 99, 90)
+        form.addRow("Intensity (higher = fewer spots)", int_row)
 
-        self.sp_margin = QtWidgets.QSpinBox()
-        self.sp_margin.setRange(0, 50)
-        self.sp_margin.setValue(30)
-        form.addRow("Grow margin (percentile below seed)", self.sp_margin)
+        sl_margin, self.sp_margin, margin_row = self._slider_spin(0, 50, 10)
+        form.addRow("Grow margin (percentile below seed)", margin_row)
 
-        self.sp_minsize = QtWidgets.QSpinBox()
-        self.sp_minsize.setRange(1, 200)
-        self.sp_minsize.setValue(5)
-        form.addRow("Min region size (spots)", self.sp_minsize)
+        sl_minsize, self.sp_minsize, minsize_row = self._slider_spin(1, 200, 5)
+        form.addRow("Min region size (spots)", minsize_row)
 
         # how deep the valley between two centers must be before they stay separate
-        self.sp_split = QtWidgets.QSpinBox()
-        self.sp_split.setRange(0, 100)
-        self.sp_split.setValue(30)
-        self.sp_split.setSuffix(" %")
-        self.sp_split.setToolTip(
+        sl_split, self.sp_split, split_row = self._slider_spin(0, 100, 40, suffix=" %")
+        split_tip = (
             "When growing from two centers meets, keep them as SEPARATE regions only "
             "if the valley between them drops by at least this % of the peak height.\n"
             "Lower = split more eagerly; 100% = always merge touching regions.")
-        form.addRow("Split valley depth", self.sp_split)
+        self.sp_split.setToolTip(split_tip)
+        sl_split.setToolTip(split_tip)
+        form.addRow("Split valley depth", split_row)
 
         self.cb_norm = QtWidgets.QCheckBox("Normalize by coverage (UMI)")
         has_cov = self.data is not None and self.data.coverage is not None
@@ -1081,10 +1074,7 @@ class AutoTumorDialog(QtWidgets.QDialog):
         bb.rejected.connect(self.close)
         form.addRow(bb)
 
-        self.sl.valueChanged.connect(self._on_intensity)
-        self.sp_margin.valueChanged.connect(lambda _: self._recompute())
-        self.sp_minsize.valueChanged.connect(lambda _: self._recompute())
-        self.sp_split.valueChanged.connect(lambda _: self._recompute())
+        # the four slider/spin pairs already call _recompute via _slider_spin
         self.cb_norm.toggled.connect(lambda _: self._recompute())
         self._recompute()
 
@@ -1095,11 +1085,27 @@ class AutoTumorDialog(QtWidgets.QDialog):
         w.setLayout(layout)
         return w
 
-    # -- intensity / recompute -------------------------------------------
-    def _on_intensity(self, v: int) -> None:
-        self.lbl_intensity.setText(str(v))
-        self._recompute()
+    def _slider_spin(self, lo: int, hi: int, val: int, suffix: str = ""):
+        """A horizontal slider paired with a spin box (drag, step with the
+        up/down arrows, or type a number). The two stay in sync and each fires
+        `_recompute`. Returns (slider, spinbox, container_widget)."""
+        sl = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        sl.setRange(lo, hi)
+        sp = QtWidgets.QSpinBox()
+        sp.setRange(lo, hi)
+        if suffix:
+            sp.setSuffix(suffix)
+        sl.setValue(val)
+        sp.setValue(val)
+        sl.valueChanged.connect(sp.setValue)   # slider drag → spin box
+        sp.valueChanged.connect(sl.setValue)   # typed/stepped value → slider
+        sp.valueChanged.connect(lambda _: self._recompute())
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(sl, 1)
+        row.addWidget(sp)
+        return sl, sp, self._wrap(row)
 
+    # -- recompute -------------------------------------------------------
     def _recompute(self) -> None:
         if not self.data:
             return
