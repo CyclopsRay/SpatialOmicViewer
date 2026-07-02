@@ -18,6 +18,7 @@ HILITE_BRUSH = pg.mkBrush(231, 76, 60, 220)     # red
 HILITE_PEN = pg.mkPen(150, 20, 20, 255)
 SELECT_BRUSH = pg.mkBrush(241, 196, 15, 230)    # yellow (active lasso selection)
 SELECT_PEN = pg.mkPen(120, 90, 0, 255)
+MULTI_REGION_BRUSH = pg.mkBrush(70, 70, 70, 235)  # spot claimed by >1 region (Overview)
 
 # Burden colour ramp: sky blue (low SNV count) -> purple (high).
 BURDEN_CMAP = pg.ColorMap([0.0, 0.5, 1.0],
@@ -99,6 +100,7 @@ class SpatialView(QtWidgets.QWidget):
 
     selectionChanged = QtCore.Signal(list)  # list[str] barcodes
     hoveredRegion = QtCore.Signal(object)   # region name (str) or None — change-only
+    overviewRequested = QtCore.Signal()     # "Overview" button clicked
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -170,6 +172,13 @@ class SpatialView(QtWidgets.QWidget):
             "border:1px solid #aaa;border-radius:3px;font-size:10px;}")
         self.btn_reset.clicked.connect(self.reset_view)
 
+        # Overview button, directly under Reset: paint every region its own colour.
+        self.btn_overview = QtWidgets.QPushButton("Overview", self)
+        self.btn_overview.setStyleSheet(
+            "QPushButton{background:rgba(255,255,255,200);padding:2px 8px;"
+            "border:1px solid #aaa;border-radius:3px;font-size:10px;}")
+        self.btn_overview.clicked.connect(self.overviewRequested)
+
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.glw)
@@ -220,12 +229,23 @@ class SpatialView(QtWidgets.QWidget):
             self.color_toggle.setChecked(self._color_mode)
         self._apply_color_mode()
 
+    def _set_uniform_brush(self, brush) -> None:
+        """Paint every base spot the same brush, first dropping any per-point brushes
+        left behind by a previous colour mode. pyqtgraph's single-arg ``setBrush``
+        only updates the *default* brush and leaves stale per-point ``data['brush']``
+        in place, so toggling colour-by-count off (or Reset/Overview) would otherwise
+        keep the old per-spot colours."""
+        data = self._spots.data
+        if data is not None and len(data) > 0:
+            data["brush"] = None
+        self._spots.setBrush(brush)
+
     def _apply_color_mode(self) -> None:
         """Recolour base spots by SNV-count rank and show/hide the legend."""
         self._remove_legend()
         if (not self._color_mode or self._burden is None
                 or len(self._burden) != len(self._barcodes) or len(self._barcodes) == 0):
-            self._spots.setBrush(BASE_BRUSH)
+            self._set_uniform_brush(BASE_BRUSH)
             return
         b = self._burden
         # quantile-rank in [0,1] so the ramp spreads across the (skewed) population
@@ -375,6 +395,46 @@ class SpatialView(QtWidgets.QWidget):
         self._preview.setData([])
         self._seeds.setData([])
 
+    # ------------------------------------------------ all-regions overview
+    def show_region_overview(self, region_to_bcs: dict) -> int:
+        """Paint every plotted spot by the region it belongs to — a distinct colour
+        per region. Spots claimed by more than one region are painted dark grey;
+        spots in no region keep the pale base colour. Clears selections/colour modes
+        and any burden legend. Returns the number of multiply-assigned spots."""
+        self.clear_highlight()
+        self.clear_preview()
+        self.clear_centers()
+        self._remove_sel_legend()
+        self._remove_legend()
+        self._color_mode = False
+        if self.color_toggle.isChecked():
+            self.color_toggle.setChecked(False)   # paints BASE_BRUSH; overwritten below
+        self._hide_hover_label()
+
+        names = list(region_to_bcs.keys())
+        n = max(1, len(names))
+        region_brush = {name: pg.mkBrush(pg.intColor(i, hues=n))
+                        for i, name in enumerate(names)}
+        # count how many regions claim each barcode, and remember the sole region
+        n_regions: dict = {}
+        sole_region: dict = {}
+        for name in names:
+            for bc in region_to_bcs[name]:
+                n_regions[bc] = n_regions.get(bc, 0) + 1
+                sole_region[bc] = name
+        brushes = []
+        for bc in self._barcodes:
+            c = n_regions.get(bc, 0)
+            if c == 0:
+                brushes.append(PALE_BRUSH)
+            elif c > 1:
+                brushes.append(MULTI_REGION_BRUSH)
+            else:
+                brushes.append(region_brush[sole_region[bc]])
+        if brushes:
+            self._spots.setBrush(brushes)
+        return sum(1 for bc in self._barcodes if n_regions.get(bc, 0) > 1)
+
     # ------------------------------------------------------- profile export
     def export_profile_map(self, region_to_bcs: dict, with_background: bool,
                            path: str) -> str:
@@ -445,7 +505,7 @@ class SpatialView(QtWidgets.QWidget):
         if self.color_toggle.isChecked():
             self.color_toggle.setChecked(False)
         self._hide_hover_label()
-        self._spots.setBrush(PALE_BRUSH)
+        self._set_uniform_brush(PALE_BRUSH)
 
     # ----------------------------------------------------- hover-to-identify
     def set_hover_regions(self, mapping: dict) -> None:
@@ -548,3 +608,8 @@ class SpatialView(QtWidgets.QWidget):
         self.btn_reset.adjustSize()
         self.btn_reset.move(m, m)            # top-left
         self.btn_reset.raise_()
+        self.btn_overview.adjustSize()
+        # widen to match Reset so the two stack tidily, and sit just below it
+        self.btn_overview.setFixedWidth(max(self.btn_overview.width(), self.btn_reset.width()))
+        self.btn_overview.move(m, m + self.btn_reset.height() + 4)
+        self.btn_overview.raise_()

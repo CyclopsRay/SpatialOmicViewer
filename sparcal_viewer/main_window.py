@@ -86,6 +86,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spatial = SpatialView()
         self.spatial.selectionChanged.connect(self._on_spatial_selection)
         self.spatial.hoveredRegion.connect(self._on_hover_region)
+        self.spatial.overviewRequested.connect(self._show_overview)
 
         # Placeholder shown before any study is loaded.
         placeholder = QtWidgets.QWidget()
@@ -529,6 +530,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.region_tree.setCurrentItem(None)
         self._clear_snvs()
         self.spatial.reset_view()
+
+    def _show_overview(self) -> None:
+        """Overview button: colour the tissue by every region in the current profile
+        (distinct colour each), dark grey where regions overlap."""
+        if self.data is None:
+            return
+        region_to_bcs = {name: self.data.region_in_matrix(name)
+                         for name in self.data.regions}
+        region_to_bcs = {k: v for k, v in region_to_bcs.items() if v}
+        if not region_to_bcs:
+            self.statusBar().showMessage(
+                "No tumor regions in this profile to overview")
+            return
+        n_multi = self.spatial.show_region_overview(region_to_bcs)
+        msg = (f"Overview: {len(region_to_bcs)} region(s) in profile "
+               f"'{self.data.current_profile}'")
+        if n_multi:
+            msg += f" — {n_multi} spot(s) in >1 region shown dark grey"
+        self.statusBar().showMessage(msg)
 
     def _color_spots_by_snvs(self, snvs: List[str], title: str) -> None:
         """Highlight the spots carrying `snvs`, coloured by how many of those SNVs each

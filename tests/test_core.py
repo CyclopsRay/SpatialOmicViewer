@@ -85,6 +85,26 @@ def main():
     if sd.coverage is not None:
         assert not (inten.values == burden.values).all()
 
+    # --- magnitude-matrix semantics (e.g. gene-expression studies) ----------
+    # Burden is a value row-sum, so scaling every present entry by k scales the
+    # burden by k, while the presence-based "% of spots" grouping is unchanged.
+    import numpy as np
+    import pandas as pd
+    base_burden = sd.per_spot_burden().copy()
+    base_general = set(sd.generate_general(80))
+    orig_matrix, orig_counts = sd.matrix, sd._total_counts
+    sd.matrix = pd.DataFrame(orig_matrix.values.astype(np.int64) * 3,
+                             index=orig_matrix.index, columns=orig_matrix.columns)
+    sd._total_counts = (sd.matrix > 0).sum(axis=0)
+    assert np.array_equal(sd.per_spot_burden().values, base_burden.values * 3), \
+        "burden must sum magnitudes, not count presence"
+    assert set(sd.generate_general(80)) == base_general, \
+        "presence-based grouping must ignore magnitude scaling"
+    assert int(sd._total_counts.max()) <= sd.matrix.shape[0], \
+        "_total_counts must be a per-spot presence count"
+    sd.matrix, sd._total_counts = orig_matrix, orig_counts
+    print("magnitude-matrix burden/grouping semantics OK")
+
     # --- spot adjacency -----------------------------------------------------
     bcs, neighbors = sd.spot_adjacency()
     deg = [len(n) for n in neighbors]

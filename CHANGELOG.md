@@ -4,6 +4,45 @@ Version history for the SPARCAL Spatial-SNV Viewer. The running version is
 `sparcal_viewer.__version__`; the About dialog (click the app name on the top
 bar) shows it alongside the build time.
 
+## 1.3.0
+- **New "Overview" button** (left view, directly under **Reset**): paints every
+  tumor region in the current profile its own colour so the whole profile is
+  visible at a glance. Spots claimed by **more than one region are shown dark
+  grey**; spots in no region stay pale. Hover still names the region under the
+  cursor, and **Reset** clears the overview.
+- **Fix: turning off "color by SNV count" now restores a uniform colour.** Spots
+  kept their per-spot burden colours because pyqtgraph's single-brush `setBrush`
+  leaves stale per-point brushes in place; the view now clears them, so toggling
+  the mode off (and Reset / Overview) repaints every spot uniformly.
+
+## 1.2.0
+- **Magnitude-aware burden — gene-expression studies now carry real expression.**
+  The per-spot burden is now the **row-sum of the matrix values** instead of a
+  count of nonzero columns. For the binary SNV studies this is identical (values
+  are 0/1), but a magnitude matrix (e.g. a gene-expression study) now drives the
+  burden/`Auto`-region signal by expression level, not mere gene presence.
+  - `DLPFC_151507_GEX.zip` was rebuilt: values now encode **log-normalized
+    expression** — `normalize_total(1e4)` per spot → `log1p` → `round(x * 36)` →
+    `uint8` (0 = absent, preserved exactly).
+  - The "% of spots" variant grouping (`generate_*`) and the cached per-feature
+    total now use a **presence** count (`value > 0`), so they stay correct
+    regardless of whether the matrix stores presence or magnitudes.
+
+## 1.1.0
+- **New example studies on the `SPARCAL-studies-v1` release:**
+  - `DCIS_1_SPARCAL.zip` — DCIS section 1, SPARCAL SNV calls (merged germline +
+    UPV + somatic matrix).
+  - `DCIS_2_SpatialSNV.zip` — DCIS section 2, SNVs called by **SpatialSNV**
+    (Mutect2-based); same Visium section as the bundled `DCIS_2_SPARCAL`.
+  - `DLPFC_151507_GEX.zip` — DLPFC 151507 **gene-expression** study. The matrix is
+    a per-spot gene-presence matrix (gene detected → 1) from the Visium
+    filtered_feature_bc_matrix, so per-spot "burden" is gene complexity and the
+    SNV list / Auto regions operate on genes.
+- **P4/P6 now ship coverage:** `P4_rep1_SPARCAL.zip` and `P6_rep1_SPARCAL.zip` now
+  include a `spot_coverage.csv`, so **Auto** tumor detection coverage-normalizes
+  the SNV burden for those sections instead of falling back to raw burden.
+- Every new/updated study bundles a `spot_coverage.csv` (per-spot total UMI).
+
 ## 1.0.1
 - **Auto tumor regions — every knob is now a slider + spin box:** Intensity, Grow
   margin, Min region size, and Split valley depth each pair a drag slider with a

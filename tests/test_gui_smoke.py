@@ -81,9 +81,36 @@ def main():
     assert win.spatial._burden is not None
     win.spatial.set_color_mode(True)
     assert win.spatial._legend is not None
+    assert any(b is not None for b in win.spatial._spots.data["brush"]), \
+        "per-spot brushes not applied in colour-by-count mode"
     win.spatial.set_color_mode(False)
     assert win.spatial._legend is None
+    # bug fix: toggling colour-by-count OFF must drop the per-spot brushes so every
+    # spot shares one uniform colour again (pyqtgraph keeps stale per-point brushes).
+    assert all(b is None for b in win.spatial._spots.data["brush"]), \
+        "colour-by-count brushes not cleared when toggled off"
     print("burden colour mode toggle OK")
+
+    # Overview: every region gets its own colour; spots in >1 region go dark grey.
+    from sparcal_viewer.spatial_view import MULTI_REGION_BRUSH, PALE_BRUSH
+    plotted = win.spatial._barcodes
+    pos = {b: i for i, b in enumerate(plotted)}
+    a0, a1, shared, b3 = plotted[0], plotted[1], plotted[2], plotted[3]
+    n_multi = win.spatial.show_region_overview(
+        {"R1": [a0, a1, shared], "R2": [shared, b3]})   # `shared` in both -> grey
+    brushes = list(win.spatial._spots.data["brush"])
+    def _rgb(bc):
+        return brushes[pos[bc]].color().getRgb()
+    assert n_multi == 1
+    assert _rgb(shared) == MULTI_REGION_BRUSH.color().getRgb(), "shared spot not dark grey"
+    assert _rgb(a0) not in (PALE_BRUSH.color().getRgb(),
+                            MULTI_REGION_BRUSH.color().getRgb()), "region spot mis-coloured"
+    unassigned = next((b for b in plotted if b not in {a0, a1, shared, b3}), None)
+    if unassigned is not None:
+        assert _rgb(unassigned) == PALE_BRUSH.color().getRgb(), "unassigned spot not pale"
+    # main-window wiring runs against the real profile without error
+    win._show_overview()
+    print(f"overview colouring OK ({n_multi} shared spot(s) dark grey)")
 
     # auto tumor regions dialog: open, recompute, create
     win._open_auto_dialog()

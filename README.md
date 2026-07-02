@@ -48,8 +48,11 @@ so there is nothing else to download.
 | `DLPFC_151507_SPARCAL.zip` | DLPFC (spatialLIBD) | ships a **Ground Truth** profile of cortical layers L1–L6 + WM |
 | `DLPFC_151669_SPARCAL.zip` | DLPFC | Ground Truth profile (5 annotated layers for this section) |
 | `DLPFC_151673_SPARCAL.zip` | DLPFC | Ground Truth profile (L1–L6 + WM) |
-| `P4_rep1_SPARCAL.zip` | cSCC P4 (Visium rep1) | tumor section, no preset profile |
-| `P6_rep1_SPARCAL.zip` | cSCC P6 (Visium rep1) | tumor section, no preset profile |
+| `DLPFC_151507_GEX.zip` | DLPFC 151507 | **gene-expression** study — matrix is per-spot gene presence (gene detected → 1), so the SNV list / Auto regions operate on genes |
+| `P4_rep1_SPARCAL.zip` | cSCC P4 (Visium rep1) | tumor section, no preset profile; coverage-normalized Auto |
+| `P6_rep1_SPARCAL.zip` | cSCC P6 (Visium rep1) | tumor section, no preset profile; coverage-normalized Auto |
+| `DCIS_1_SPARCAL.zip` | DCIS section 1 | SPARCAL SNV calls (merged germline + UPV + somatic) |
+| `DCIS_2_SpatialSNV.zip` | DCIS section 2 | SNVs called by **SpatialSNV** (Mutect2); same section as bundled `DCIS_2_SPARCAL` |
 
 **To open one:**
 1. Download a zip from the release page (or `curl -L -O <asset-url>`).

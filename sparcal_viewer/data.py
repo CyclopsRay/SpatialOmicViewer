@@ -110,7 +110,11 @@ class StudyData:
         self.matrix = pd.read_pickle(self.cfg.snv_matrix)
         if self.matrix.index.has_duplicates:
             self.matrix = self.matrix[~self.matrix.index.duplicated(keep="first")]
-        self._total_counts = self.matrix.sum(axis=0)
+        # per-column count of spots where the feature is PRESENT (value > 0). For a
+        # binary presence matrix this equals the column sum; for a magnitude matrix
+        # (e.g. a gene-expression study) it stays a spot count, so the "% of spots"
+        # variant-grouping logic below is unaffected by the stored magnitudes.
+        self._total_counts = (self.matrix > 0).sum(axis=0)
 
         with open(self.cfg.scalefactors) as fh:
             sf = json.load(fh)
@@ -383,7 +387,12 @@ class StudyData:
 
     # ----------------------------------------------------- per-spot burden
     def per_spot_burden(self, snvs: Optional[List[str]] = None) -> pd.Series:
-        """Number of SNVs present per plotted spot (presence row-sum), in plot order.
+        """Per-spot burden = row-sum of the matrix values, in plot order.
+
+        For a binary presence matrix this is the number of SNVs present per spot
+        (each value is 0/1). For a magnitude matrix (e.g. a gene-expression study
+        whose values encode log-normalized expression) it is the total expression
+        per spot, so the burden signal reflects magnitude rather than mere presence.
 
         If `snvs` is given the burden is restricted to those columns; otherwise it
         is over the whole matrix."""
@@ -395,9 +404,9 @@ class StudyData:
             sub = self.matrix.loc[bcs, cols] if cols else None
             if sub is None:
                 return pd.Series(0, index=bcs, dtype=np.int64)
-            vals = (sub.values > 0).sum(axis=1)
+            vals = sub.values.sum(axis=1)
         else:
-            vals = (self.matrix.loc[bcs].values > 0).sum(axis=1)
+            vals = self.matrix.loc[bcs].values.sum(axis=1)
         return pd.Series(vals.astype(np.int64), index=bcs)
 
     def per_spot_intensity(self, normalize: bool = True,
@@ -616,7 +625,9 @@ class StudyData:
         if n_inside == 0:
             zeros = pd.Series(0, index=self.matrix.columns, dtype=np.int64)
             return zeros, 0, n_outside
-        counts_inside = self.matrix.loc[inside_bcs].sum(axis=0).astype(np.int64)
+        # presence count (spots with value > 0) so magnitude matrices keep "% of
+        # spots" semantics; identical to the column sum for a binary matrix.
+        counts_inside = (self.matrix.loc[inside_bcs] > 0).sum(axis=0).astype(np.int64)
         return counts_inside, n_inside, n_outside
 
     def generate_exclusive(self, region: str) -> List[str]:

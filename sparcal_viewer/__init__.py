@@ -2,7 +2,7 @@
 import datetime
 import os
 
-__version__ = "1.0.1"
+__version__ = "1.3.0"
 
 
 def build_time() -> str:
