@@ -18,7 +18,33 @@ HILITE_BRUSH = pg.mkBrush(231, 76, 60, 220)     # red
 HILITE_PEN = pg.mkPen(150, 20, 20, 255)
 SELECT_BRUSH = pg.mkBrush(241, 196, 15, 230)    # yellow (active lasso selection)
 SELECT_PEN = pg.mkPen(120, 90, 0, 255)
-MULTI_REGION_BRUSH = pg.mkBrush(70, 70, 70, 235)  # spot claimed by >1 region (Overview)
+# Colour claimed by >1 region in the Overview. Near-black so it can never be
+# confused with a hue in REGION_PALETTE under colour-vision deficiency — the old
+# mid-grey (70,70,70) collapsed onto the pink/magenta region slot for CVD users.
+MULTI_REGION_BRUSH = pg.mkBrush(26, 26, 25, 235)  # spot claimed by >1 region (Overview)
+
+# Colour-blind-safe categorical palette for the region Overview and profile-map
+# export. Fixed order (NOT the old pg.intColor rainbow, which cycled the full hue
+# wheel and put a pink next to the grey conflict marker). These eight hues are the
+# dataviz-skill default, validated CVD-safe (worst adjacent ΔE 24.2, ≥12 target).
+REGION_PALETTE = [
+    (42, 120, 214),   # blue
+    (27, 175, 122),   # aqua
+    (237, 161, 0),    # yellow
+    (0, 131, 0),      # green
+    (74, 58, 167),    # violet
+    (227, 73, 72),    # red
+    (232, 123, 164),  # magenta
+    (235, 104, 52),   # orange
+]
+
+
+def region_brush(i: int) -> QtGui.QBrush:
+    """Opaque brush for the i-th region, cycling REGION_PALETTE in fixed order.
+    (With >8 regions the palette repeats; regions stay distinguishable by their
+    on-tissue position and the region list — colour is not the sole cue.)"""
+    return pg.mkBrush(*REGION_PALETTE[i % len(REGION_PALETTE)])
+
 
 # Burden colour ramp: sky blue (low SNV count) -> purple (high).
 BURDEN_CMAP = pg.ColorMap([0.0, 0.5, 1.0],
@@ -412,9 +438,7 @@ class SpatialView(QtWidgets.QWidget):
         self._hide_hover_label()
 
         names = list(region_to_bcs.keys())
-        n = max(1, len(names))
-        region_brush = {name: pg.mkBrush(pg.intColor(i, hues=n))
-                        for i, name in enumerate(names)}
+        region_brush_map = {name: region_brush(i) for i, name in enumerate(names)}
         # count how many regions claim each barcode, and remember the sole region
         n_regions: dict = {}
         sole_region: dict = {}
@@ -430,7 +454,7 @@ class SpatialView(QtWidgets.QWidget):
             elif c > 1:
                 brushes.append(MULTI_REGION_BRUSH)
             else:
-                brushes.append(region_brush[sole_region[bc]])
+                brushes.append(region_brush_map[sole_region[bc]])
         if brushes:
             self._spots.setBrush(brushes)
         return sum(1 for bc in self._barcodes if n_regions.get(bc, 0) > 1)
@@ -442,13 +466,12 @@ class SpatialView(QtWidgets.QWidget):
         tissue, with/without the background image — to a PDF (vector) or PNG file
         (chosen by extension). Returns the written path ('' on failure)."""
         self.reset_view()                       # clean canvas: pale base, no overlays
-        n = max(1, len(region_to_bcs))
         pos = {bc: (self._xy[i, 0], self._xy[i, 1])
                for i, bc in enumerate(self._barcodes)}
         size = self._idx_size() * 1.05
         spots = []
         for ri, (_name, bcs) in enumerate(region_to_bcs.items()):
-            brush = pg.mkBrush(pg.intColor(ri, hues=n))
+            brush = region_brush(ri)
             for bc in bcs:
                 if bc in pos:
                     spots.append({"pos": pos[bc], "size": size, "brush": brush})

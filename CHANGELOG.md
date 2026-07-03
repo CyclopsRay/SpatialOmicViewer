@@ -4,6 +4,16 @@ Version history for the SPARCAL Spatial-SNV Viewer. The running version is
 `sparcal_viewer.__version__`; the About dialog (click the app name on the top
 bar) shows it alongside the build time.
 
+## 1.4.0
+- **Colour-blind-safe Overview palette.** The Overview / profile-map export no
+  longer cycles the full HSV rainbow (`pg.intColor`), which put a pink region hue
+  right next to the grey "multiple regions" marker — indistinguishable under
+  colour-vision deficiency. Regions now use a fixed 8-hue categorical palette
+  validated CVD-safe (worst adjacent ΔE 24.2), and the multiply-assigned marker
+  is now **near-black** (`#1a1a19`) so it can never collide with a region hue.
+  With >8 regions the palette repeats; position + the region list keep them
+  distinguishable (colour is no longer the sole cue).
+
 ## 1.3.0
 - **New "Overview" button** (left view, directly under **Reset**): paints every
   tumor region in the current profile its own colour so the whole profile is
