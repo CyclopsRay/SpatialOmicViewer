@@ -1015,6 +1015,12 @@ class ThresholdDialog(QtWidgets.QDialog):
 class AutoTumorDialog(QtWidgets.QDialog):
     """Non-modal panel: auto-detect contiguous tumor regions by SNV-burden intensity.
 
+    Two methods (top selector):
+      raw_burden  tumor EXTENT from un-normalized SNV burden (≈ cellularity; the
+                  best-scoring extent detector on the DCIS ground truth).
+      customized  the fully tunable detector, incl. optional coverage (UMI)
+                  normalization — the prior default behaviour.
+
     Higher intensity keeps fewer/smaller regions. The user can lasso spots on the
     tissue to force-add or exclude seeds, then create the regions."""
 
@@ -1036,6 +1042,17 @@ class AutoTumorDialog(QtWidgets.QDialog):
         self._last = {"regions": [], "seeds": []}
 
         form = QtWidgets.QFormLayout(self)
+
+        # Detection method. raw_burden = tumor EXTENT from un-normalized SNV burden
+        # (best extent detector on the DCIS GT); customized = the fully tunable
+        # detector incl. the optional coverage normalization (prior default).
+        self.cb_method = QtWidgets.QComboBox()
+        self.cb_method.addItems(["raw_burden", "customized"])
+        self.cb_method.setToolTip(
+            "raw_burden: tumor extent from raw (un-normalized) SNV burden — best "
+            "for delineating the tumor mass.\n"
+            "customized: fully tunable; enables 'Normalize by coverage (UMI)'.")
+        form.addRow("Method", self.cb_method)
 
         # every knob is a slider + spin box (drag, step, or type a number)
         self.sl, self.sp_intensity, int_row = self._slider_spin(50, 99, 90)
@@ -1096,6 +1113,9 @@ class AutoTumorDialog(QtWidgets.QDialog):
 
         # the four slider/spin pairs already call _recompute via _slider_spin
         self.cb_norm.toggled.connect(lambda _: self._recompute())
+        self.cb_method.currentTextChanged.connect(
+            lambda _: (self._on_method_changed(), self._recompute()))
+        self._on_method_changed()      # apply the default method's coverage setting
         self._recompute()
 
     @staticmethod
@@ -1141,6 +1161,20 @@ class AutoTumorDialog(QtWidgets.QDialog):
         n_spots = sum(len(r) for r in res["regions"])
         self.lbl_preview.setText(f"{len(res['regions'])} regions · {n_spots} spots")
         self.spatial.preview_regions(res["regions"], res["seeds"])
+
+    def _on_method_changed(self) -> None:
+        """raw_burden forces un-normalized burden and disables the coverage
+        checkbox; customized restores the tunable coverage-normalize option."""
+        raw = self.cb_method.currentText() == "raw_burden"
+        has_cov = self.data is not None and self.data.coverage is not None
+        self.cb_norm.blockSignals(True)
+        if raw:
+            self.cb_norm.setChecked(False)
+            self.cb_norm.setEnabled(False)
+        else:
+            self.cb_norm.setEnabled(has_cov)
+            self.cb_norm.setChecked(has_cov)
+        self.cb_norm.blockSignals(False)
 
     # -- manual seed editing ---------------------------------------------
     def seed_mode(self) -> bool:

@@ -4,6 +4,17 @@ Version history for the SPARCAL Spatial-SNV Viewer. The running version is
 `sparcal_viewer.__version__`; the About dialog (click the app name on the top
 bar) shows it alongside the build time.
 
+## 1.5.0
+- **Auto tumor regions: new "Method" selector.** `raw_burden` detects tumor
+  **extent** from un-normalized SNV burden — validated on the DCIS sec2 ground
+  truth as the best extent detector (raw burden ≈ per-spot coverage/cellularity,
+  which tracks the dense DCIS ducts; coverage-normalizing it *removes* that
+  signal). `customized` keeps the prior fully tunable behaviour, including the
+  optional "Normalize by coverage (UMI)" checkbox. Default is `raw_burden`;
+  selecting it forces normalization off and disables the checkbox, while
+  `customized` re-enables it (checked when a study has coverage). A profile /
+  latent-factor method for clonal *substructure* is planned separately.
+
 ## 1.4.0
 - **Colour-blind-safe Overview palette.** The Overview / profile-map export no
   longer cycles the full HSV rainbow (`pg.intColor`), which put a pink region hue
